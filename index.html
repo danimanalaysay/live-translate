@@ -1,0 +1,352 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#0f1115">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<title>Live Translate · 中文 → English</title>
+<style>
+  :root {
+    --bg: #0f1115; --panel: #181b22; --line: #2a2f3a; --text: #e9ecf2;
+    --muted: #8a93a6; --accent: #4f8cff; --rec: #ff4d5e; --zh: #b9c2d6;
+    --fs: 20px;
+  }
+  body.light {
+    --bg: #f6f7f9; --panel: #ffffff; --line: #dfe3ea; --text: #14171f;
+    --muted: #677086; --zh: #4a5266;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; }
+  body {
+    background: var(--bg); color: var(--text);
+    font-family: system-ui, -apple-system, "Segoe UI", Roboto, "PingFang TC", "Microsoft JhengHei", sans-serif;
+    display: flex; flex-direction: column;
+    padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left);
+  }
+  header {
+    display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+    padding: 10px 12px; border-bottom: 1px solid var(--line); background: var(--panel);
+  }
+  header h1 { font-size: 16px; margin: 0 auto 0 0; font-weight: 600; white-space: nowrap; }
+  select, button {
+    font: inherit; font-size: 14px; color: var(--text); background: var(--bg);
+    border: 1px solid var(--line); border-radius: 8px; padding: 6px 10px;
+  }
+  button { cursor: pointer; }
+  button:active { transform: scale(0.97); }
+  #log {
+    flex: 1; overflow-y: auto; padding: 12px 14px 20px; scroll-behavior: smooth;
+  }
+  .entry { padding: 10px 0; border-bottom: 1px solid var(--line); }
+  .entry .zh { color: var(--zh); font-size: calc(var(--fs) * 0.8); line-height: 1.45; }
+  .entry .en { font-size: var(--fs); line-height: 1.4; margin-top: 4px; font-weight: 500; }
+  .entry .t { color: var(--muted); font-size: 11px; margin-top: 2px; }
+  .entry.pending .en { color: var(--muted); font-style: italic; }
+  #live { border-bottom: none; opacity: 0.75; }
+  #live:empty { display: none; }
+  #empty { color: var(--muted); text-align: center; margin-top: 18vh; line-height: 1.6; padding: 0 20px; }
+  footer {
+    display: flex; align-items: center; gap: 10px; padding: 10px 12px 14px;
+    border-top: 1px solid var(--line); background: var(--panel);
+  }
+  #mic {
+    flex: 1; font-size: 18px; font-weight: 600; padding: 14px; border-radius: 12px;
+    background: var(--accent); color: #fff; border: none;
+  }
+  #mic.on { background: var(--rec); animation: pulse 1.6s infinite; }
+  @keyframes pulse { 50% { opacity: 0.8; } }
+  #status { font-size: 12px; color: var(--muted); padding: 4px 14px; min-height: 22px; background: var(--panel); }
+  #status.err { color: var(--rec); }
+  .small { padding: 12px; border-radius: 12px; }
+  dialog {
+    background: var(--panel); color: var(--text); border: 1px solid var(--line);
+    border-radius: 12px; max-width: 420px; width: calc(100% - 32px);
+  }
+  dialog::backdrop { background: rgba(0,0,0,.5); }
+  dialog label { display: block; margin: 12px 0 4px; font-size: 14px; color: var(--muted); }
+  dialog .row { display: flex; gap: 8px; margin-top: 16px; justify-content: flex-end; }
+  dialog select, dialog input[type=range] { width: 100%; }
+</style>
+</head>
+<body>
+<header>
+  <h1>🎙️ Live Translate</h1>
+  <select id="srcLang" aria-label="Spoken language">
+    <option value="zh-TW">國語 (台灣) · Taiwan Mandarin</option>
+    <option value="zh-CN">普通话 · Mainland Mandarin</option>
+    <option value="yue-Hant-HK">廣東話 · Cantonese</option>
+  </select>
+  <button id="settingsBtn" aria-label="Settings">⚙️</button>
+</header>
+
+<div id="status">Tap Start and put your phone near the speaker.</div>
+
+<main id="log">
+  <div id="empty">
+    Speech in Mandarin (Traditional) will appear here<br>with an English translation underneath.<br><br>
+    Use Chrome on Android, Safari on iPhone, or Chrome/Edge on a computer.
+  </div>
+  <div id="entries"></div>
+  <div class="entry" id="live"></div>
+</main>
+
+<footer>
+  <button id="mic">▶ Start</button>
+  <button id="copyBtn" class="small" title="Copy transcript">📋</button>
+  <button id="clearBtn" class="small" title="Clear">🗑️</button>
+</footer>
+
+<dialog id="settings">
+  <h3 style="margin:0">Settings</h3>
+  <label for="tgtLang">Translate into</label>
+  <select id="tgtLang">
+    <option value="en">English</option>
+    <option value="zh-TW">繁體中文</option>
+    <option value="tl">Filipino</option>
+    <option value="ja">日本語</option>
+    <option value="ko">한국어</option>
+    <option value="vi">Tiếng Việt</option>
+    <option value="id">Bahasa Indonesia</option>
+  </select>
+  <label for="fs">Text size: <span id="fsVal"></span></label>
+  <input type="range" id="fs" min="14" max="40" step="1">
+  <label for="showZh">Show original Chinese</label>
+  <select id="showZh"><option value="1">Yes</option><option value="0">No (English only)</option></select>
+  <label for="liveTr">Translate while still speaking</label>
+  <select id="liveTr"><option value="1">Yes (faster, more requests)</option><option value="0">No (only finished sentences)</option></select>
+  <label for="theme">Theme</label>
+  <select id="theme"><option value="dark">Dark</option><option value="light">Light</option></select>
+  <div class="row"><button id="closeSettings">Done</button></div>
+</dialog>
+
+<script>
+(() => {
+  const $ = (id) => document.getElementById(id);
+  const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+  const isAndroid = /Android/i.test(navigator.userAgent);
+
+  // ---------- settings (stored on this device only) ----------
+  const store = {
+    get(k, d) { try { const v = localStorage.getItem('lt_' + k); return v === null ? d : v; } catch { return d; } },
+    set(k, v) { try { localStorage.setItem('lt_' + k, v); } catch {} },
+  };
+  const cfg = {
+    src: store.get('src', 'zh-TW'), tgt: store.get('tgt', 'en'), fs: store.get('fs', '20'),
+    showZh: store.get('showZh', '1'), liveTr: store.get('liveTr', '1'), theme: store.get('theme', 'dark'),
+  };
+  function applyCfg() {
+    $('srcLang').value = cfg.src; $('tgtLang').value = cfg.tgt; $('fs').value = cfg.fs;
+    $('fsVal').textContent = cfg.fs + 'px'; $('showZh').value = cfg.showZh;
+    $('liveTr').value = cfg.liveTr; $('theme').value = cfg.theme;
+    document.documentElement.style.setProperty('--fs', cfg.fs + 'px');
+    document.body.classList.toggle('light', cfg.theme === 'light');
+    document.querySelectorAll('.zh').forEach(e => e.style.display = cfg.showZh === '1' ? '' : 'none');
+  }
+  const bind = (id, key, after) => $(id).addEventListener('input', e => {
+    cfg[key] = e.target.value; store.set(key, cfg[key]); applyCfg(); after && after();
+  });
+  bind('srcLang', 'src', () => { if (running) { restartSoon = true; rec && rec.abort(); } });
+  bind('tgtLang', 'tgt'); bind('fs', 'fs'); bind('showZh', 'showZh'); bind('liveTr', 'liveTr'); bind('theme', 'theme');
+  $('settingsBtn').onclick = () => $('settings').showModal();
+  $('closeSettings').onclick = () => $('settings').close();
+
+  // ---------- status ----------
+  function status(msg, err) { $('status').textContent = msg; $('status').classList.toggle('err', !!err); }
+
+  // ---------- translation (free endpoints, Google first, MyMemory fallback) ----------
+  const cache = new Map();
+  async function translate(text) {
+    text = text.trim();
+    if (!text) return '';
+    const key = cfg.src + '|' + cfg.tgt + '|' + text;
+    if (cache.has(key)) return cache.get(key);
+    const sl = cfg.src.startsWith('yue') ? 'zh-TW' : cfg.src;
+    let out = '';
+    try {
+      const u = 'https://translate.googleapis.com/translate_a/single?client=gtx&dt=t'
+        + '&sl=' + encodeURIComponent(sl) + '&tl=' + encodeURIComponent(cfg.tgt) + '&q=' + encodeURIComponent(text);
+      const r = await fetch(u);
+      if (!r.ok) throw new Error('HTTP ' + r.status);
+      const j = await r.json();
+      out = (j[0] || []).map(s => s[0]).join('');
+    } catch (e) {
+      try {
+        const u = 'https://api.mymemory.translated.net/get?q=' + encodeURIComponent(text)
+          + '&langpair=' + encodeURIComponent(sl + '|' + cfg.tgt);
+        const r = await fetch(u);
+        const j = await r.json();
+        out = (j.responseData && j.responseData.translatedText) || '';
+      } catch (e2) {
+        status('Translation failed — check your internet connection.', true);
+        return '⚠️ (translation unavailable)';
+      }
+    }
+    if (cache.size > 500) cache.clear();
+    cache.set(key, out);
+    return out;
+  }
+
+  // ---------- transcript ----------
+  const entries = [];
+  function saveLog() { try { localStorage.setItem('lt_log', JSON.stringify(entries.slice(-300))); } catch {} }
+  function nearBottom() { const l = $('log'); return l.scrollHeight - l.scrollTop - l.clientHeight < 120; }
+  function scrollDown(force) { const l = $('log'); if (force || nearBottom()) l.scrollTop = l.scrollHeight; }
+
+  function renderEntry(e) {
+    const div = document.createElement('div');
+    div.className = 'entry' + (e.en ? '' : ' pending');
+    div.innerHTML = '<div class="zh"></div><div class="en"></div><div class="t"></div>';
+    div.querySelector('.zh').textContent = e.zh;
+    div.querySelector('.zh').style.display = cfg.showZh === '1' ? '' : 'none';
+    div.querySelector('.en').textContent = e.en || 'translating…';
+    div.querySelector('.t').textContent = e.time;
+    $('entries').appendChild(div);
+    $('empty').style.display = 'none';
+    return div;
+  }
+  async function addFinal(zh) {
+    zh = zh.trim();
+    if (!zh) return;
+    const stick = nearBottom();
+    const e = { zh, en: '', time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }) };
+    entries.push(e);
+    const div = renderEntry(e);
+    if (stick) scrollDown(true);
+    e.en = await translate(zh);
+    div.classList.remove('pending');
+    div.querySelector('.en').textContent = e.en;
+    saveLog();
+    if (stick) scrollDown(true);
+  }
+
+  // live (interim) line
+  let liveSeq = 0, liveTimer = null, lastLiveText = '';
+  function showLive(zh) {
+    const live = $('live');
+    if (!zh.trim()) { live.innerHTML = ''; lastLiveText = ''; return; }
+    if (!live.firstChild) live.innerHTML = '<div class="zh"></div><div class="en"></div>';
+    live.querySelector('.zh').textContent = zh + ' …';
+    live.querySelector('.zh').style.display = cfg.showZh === '1' ? '' : 'none';
+    $('empty').style.display = 'none';
+    lastLiveText = zh;
+    if (cfg.liveTr === '1' && !liveTimer) {
+      liveTimer = setTimeout(async () => {
+        liveTimer = null;
+        const seq = ++liveSeq, text = lastLiveText;
+        if (!text) return;
+        const en = await translate(text);
+        if (seq === liveSeq && $('live').firstChild && lastLiveText) $('live').querySelector('.en').textContent = en;
+      }, 600);
+    } else if (cfg.liveTr !== '1') {
+      live.querySelector('.en').textContent = '';
+    }
+    scrollDown();
+  }
+  function clearLive() { liveSeq++; clearTimeout(liveTimer); liveTimer = null; showLive(''); }
+
+  // ---------- speech recognition ----------
+  let rec = null, running = false, restartSoon = false, wakeLock = null, lastStart = 0, quickFails = 0;
+
+  async function keepAwake() {
+    try { if ('wakeLock' in navigator) wakeLock = await navigator.wakeLock.request('screen'); } catch {}
+  }
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible' && running) keepAwake();
+  });
+
+  function startRec() {
+    rec = new SR();
+    rec.lang = cfg.src;
+    rec.interimResults = true;
+    // Android Chrome's continuous mode repeats text; short sessions + auto-restart work better there.
+    rec.continuous = !isAndroid;
+    rec.maxAlternatives = 1;
+
+    rec.onresult = (ev) => {
+      let interim = '';
+      for (let i = ev.resultIndex; i < ev.results.length; i++) {
+        const r = ev.results[i];
+        if (r.isFinal) { clearLive(); addFinal(r[0].transcript); }
+        else interim += r[0].transcript;
+      }
+      if (interim) showLive(interim);
+      quickFails = 0;
+    };
+    rec.onerror = (ev) => {
+      if (ev.error === 'no-speech' || ev.error === 'aborted') return;
+      if (ev.error === 'not-allowed' || ev.error === 'service-not-allowed') {
+        status('Microphone blocked. Allow mic access for this page in your browser settings, then tap Start.', true);
+        stop();
+      } else if (ev.error === 'network') {
+        status('Speech service needs internet — retrying…', true);
+      } else if (ev.error === 'language-not-supported') {
+        status('This browser does not support that language. Try Chrome.', true);
+        stop();
+      } else {
+        status('Speech error: ' + ev.error, true);
+      }
+    };
+    rec.onstart = () => { lastStart = Date.now(); status('Listening (' + $('srcLang').selectedOptions[0].text + ')…'); };
+    rec.onend = () => {
+      // flush any unfinished interim text as a sentence
+      if (lastLiveText) { const t = lastLiveText; clearLive(); addFinal(t); }
+      if (running) {
+        if (Date.now() - lastStart < 1000) quickFails++;
+        if (quickFails > 8) { status('Speech recognition keeps stopping. Tap Start to try again.', true); stop(); return; }
+        setTimeout(() => { if (running) { try { startRec(); } catch {} } }, restartSoon ? 50 : 150 + quickFails * 200);
+        restartSoon = false;
+      }
+    };
+    rec.start();
+  }
+
+  function start() {
+    if (!SR) {
+      status('This browser has no speech recognition. Use Chrome (Android/PC), Edge (PC) or Safari (iPhone).', true);
+      return;
+    }
+    running = true; quickFails = 0;
+    $('mic').textContent = '■ Stop'; $('mic').classList.add('on');
+    keepAwake();
+    try { startRec(); } catch (e) { status('Could not start: ' + e.message, true); stop(); }
+  }
+  function stop() {
+    running = false;
+    $('mic').textContent = '▶ Start'; $('mic').classList.remove('on');
+    try { rec && rec.stop(); } catch {}
+    try { wakeLock && wakeLock.release(); } catch {}
+    wakeLock = null;
+    if (!$('status').classList.contains('err')) status('Stopped.');
+  }
+  $('mic').onclick = () => running ? stop() : start();
+
+  // ---------- copy / clear ----------
+  $('copyBtn').onclick = async () => {
+    const txt = entries.map(e => `[${e.time}] ${e.zh}\n${e.en}`).join('\n\n');
+    if (!txt) { status('Nothing to copy yet.'); return; }
+    try { await navigator.clipboard.writeText(txt); status('Transcript copied (' + entries.length + ' lines).'); }
+    catch { status('Copy not allowed by this browser.', true); }
+  };
+  $('clearBtn').onclick = () => {
+    if (!entries.length) return;
+    if (!$('clearBtn').dataset.armed) {
+      $('clearBtn').dataset.armed = '1'; $('clearBtn').textContent = 'Sure?';
+      setTimeout(() => { delete $('clearBtn').dataset.armed; $('clearBtn').textContent = '🗑️'; }, 2500);
+      return;
+    }
+    entries.length = 0; $('entries').innerHTML = ''; clearLive(); saveLog();
+    $('empty').style.display = ''; delete $('clearBtn').dataset.armed; $('clearBtn').textContent = '🗑️';
+    status('Cleared.');
+  };
+
+  // ---------- init ----------
+  applyCfg();
+  try { (JSON.parse(localStorage.getItem('lt_log') || '[]')).forEach(e => { entries.push(e); renderEntry(e); }); } catch {}
+  scrollDown(true);
+  if (!SR) status('Speech recognition not available in this browser. Use Chrome, Edge, or Safari.', true);
+  else if (!window.isSecureContext) status('Mic needs HTTPS (or localhost). Open this page over https://', true);
+})();
+</script>
+</body>
+</html>
