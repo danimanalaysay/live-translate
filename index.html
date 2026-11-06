@@ -67,6 +67,12 @@
   dialog label { display: block; margin: 12px 0 4px; font-size: 14px; color: var(--muted); }
   dialog .row { display: flex; gap: 8px; margin-top: 16px; justify-content: flex-end; }
   dialog select, dialog input[type=range] { width: 100%; }
+  dialog input[type=password] {
+    width: 100%; font: inherit; font-size: 14px; color: var(--text); background: var(--bg);
+    border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px;
+  }
+  dialog { max-height: 90vh; overflow-y: auto; }
+  .tag { font-size: 10px; border: 1px solid var(--line); border-radius: 4px; padding: 0 4px; margin-left: 6px; }
 </style>
 </head>
 <body>
@@ -109,6 +115,22 @@
     <option value="vi">Tiếng Việt</option>
     <option value="id">Bahasa Indonesia</option>
   </select>
+  <label for="engine">Translator for finished sentences</label>
+  <select id="engine">
+    <option value="google">Google Translate (free, basic)</option>
+    <option value="gemini">Gemini AI (free key, much better)</option>
+  </select>
+  <div id="geminiBox">
+    <label for="gkey">Gemini API key <a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener" style="color:var(--accent)">get a free key</a></label>
+    <input type="password" id="gkey" autocomplete="off" spellcheck="false" placeholder="Paste key here (saved on this device only)">
+    <label for="gmodel">Gemini model</label>
+    <select id="gmodel"><option value="">(enter key, then tap Test)</option></select>
+    <div class="row" style="justify-content:flex-start;margin-top:8px">
+      <button id="testKey">Test key</button>
+      <span id="keyMsg" style="font-size:13px;color:var(--muted);align-self:center"></span>
+    </div>
+    <p style="font-size:12px;color:var(--muted);margin:8px 0 0">Note: on Gemini's free tier Google may use what you send to improve its products. Avoid it for confidential meetings. If Gemini fails or hits its limit, the page uses Google Translate.</p>
+  </div>
   <label for="fs">Text size: <span id="fsVal"></span></label>
   <input type="range" id="fs" min="14" max="40" step="1">
   <label for="showZh">Show original Chinese</label>
@@ -134,11 +156,18 @@
   const cfg = {
     src: store.get('src', 'zh-TW'), tgt: store.get('tgt', 'en'), fs: store.get('fs', '20'),
     showZh: store.get('showZh', '1'), liveTr: store.get('liveTr', '1'), theme: store.get('theme', 'dark'),
+    engine: store.get('engine', 'google'), gkey: store.get('gkey', ''), gmodel: store.get('gmodel', ''),
   };
   function applyCfg() {
     $('srcLang').value = cfg.src; $('tgtLang').value = cfg.tgt; $('fs').value = cfg.fs;
     $('fsVal').textContent = cfg.fs + 'px'; $('showZh').value = cfg.showZh;
     $('liveTr').value = cfg.liveTr; $('theme').value = cfg.theme;
+    $('engine').value = cfg.engine; $('gkey').value = cfg.gkey;
+    $('geminiBox').style.display = cfg.engine === 'gemini' ? '' : 'none';
+    if (cfg.gmodel && ![...$('gmodel').options].some(o => o.value === cfg.gmodel)) {
+      $('gmodel').innerHTML = ''; $('gmodel').add(new Option(cfg.gmodel.replace(/^models\//, ''), cfg.gmodel));
+    }
+    if (cfg.gmodel) $('gmodel').value = cfg.gmodel;
     document.documentElement.style.setProperty('--fs', cfg.fs + 'px');
     document.body.classList.toggle('light', cfg.theme === 'light');
     document.querySelectorAll('.zh').forEach(e => e.style.display = cfg.showZh === '1' ? '' : 'none');
@@ -147,6 +176,9 @@
     cfg[key] = e.target.value; store.set(key, cfg[key]); applyCfg(); after && after();
   });
   bind('srcLang', 'src', () => { if (running) { restartSoon = true; rec && rec.abort(); } });
+  bind('engine', 'engine');
+  bind('gmodel', 'gmodel', () => { noThinkingCfg = false; store.set('noThinkCfg', ''); });
+  $('gkey').addEventListener('change', e => { cfg.gkey = e.target.value.trim(); store.set('gkey', cfg.gkey); });
   bind('tgtLang', 'tgt'); bind('fs', 'fs'); bind('showZh', 'showZh'); bind('liveTr', 'liveTr'); bind('theme', 'theme');
   $('settingsBtn').onclick = () => $('settings').showModal();
   $('closeSettings').onclick = () => $('settings').close();
@@ -187,12 +219,130 @@
     return out;
   }
 
+  // ---------- Gemini (AI translation with context) ----------
+  const GAPI = 'https://generativelanguage.googleapis.com/v1beta/';
+  const LANG_NAMES = { 'en': 'English', 'zh-TW': 'Traditional Chinese (Taiwan)', 'tl': 'Filipino', 'ja': 'Japanese',
+    'ko': 'Korean', 'vi': 'Vietnamese', 'id': 'Indonesian' };
+  const SRC_NAMES = { 'zh-TW': 'Taiwan Mandarin (Traditional Chinese)', 'zh-CN': 'Mainland Mandarin', 'yue-Hant-HK': 'Cantonese' };
+  let geminiPausedUntil = 0, noThinkingCfg = store.get('noThinkCfg', '') === '1';
+
+  // Pick the best model for fast translation from the models this key can use.
+  function rankModel(name) {
+    const n = name.toLowerCase();
+    const v = parseFloat((n.match(/gemini-(\d+(?:\.\d+)?)/) || [])[1] || '0');
+    let s = v * 100;
+    if (n.includes('flash')) s += 50;
+    if (n.includes('lite')) s -= 10;
+    if (n.includes('preview') || n.includes('exp')) s -= 100; // previews change/disappear; prefer stable
+    if (n.includes('pro')) s -= 40; // slower, lower free limits
+    return s;
+  }
+  async function listGeminiModels(key) {
+    const r = await fetch(GAPI + 'models?pageSize=200', { headers: { 'x-goog-api-key': key } });
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error((j.error && j.error.message) || ('HTTP ' + r.status));
+    return (j.models || [])
+      .filter(m => (m.supportedGenerationMethods || []).includes('generateContent'))
+      .map(m => m.name)
+      .filter(n => /^models\/gemini-/.test(n) && !/(embed|tts|image|audio|live|vision|thinking|computer|robotics|learnlm)/i.test(n))
+      .sort((a, b) => rankModel(b) - rankModel(a));
+  }
+  $('testKey').onclick = async () => {
+    const key = $('gkey').value.trim();
+    cfg.gkey = key; store.set('gkey', key);
+    if (!key) { $('keyMsg').textContent = 'Paste a key first.'; return; }
+    $('keyMsg').textContent = 'Checking…';
+    try {
+      const models = await listGeminiModels(key);
+      if (!models.length) throw new Error('No usable Gemini models for this key.');
+      $('gmodel').innerHTML = '';
+      models.forEach(m => $('gmodel').add(new Option(m.replace(/^models\//, ''), m)));
+      if (!models.includes(cfg.gmodel)) { cfg.gmodel = models[0]; store.set('gmodel', cfg.gmodel); }
+      $('gmodel').value = cfg.gmodel;
+      geminiPausedUntil = 0;
+      const t0 = Date.now();
+      const out = await geminiTranslate('大家好，我們開始開會吧。', []);
+      $('keyMsg').textContent = '✅ Works (' + ((Date.now() - t0) / 1000).toFixed(1) + 's): "' + out + '"';
+    } catch (e) {
+      $('keyMsg').textContent = '❌ ' + e.message;
+    }
+  };
+
+  async function geminiTranslate(text, context) {
+    const model = cfg.gmodel || 'models/gemini-flash-latest';
+    const tgt = LANG_NAMES[cfg.tgt] || cfg.tgt;
+    const sys = 'You are a live interpreter at a meeting in Taiwan. The input is ' + (SRC_NAMES[cfg.src] || 'Chinese')
+      + ' speech captured by automatic speech recognition, so it may have missing punctuation, homophone mistakes, or'
+      + ' wrongly recognized names; use the context to infer what the speaker most likely meant. Translate ONLY the line'
+      + ' marked NEW into natural, fluent ' + tgt + ', the way a professional interpreter would say it. Keep names, numbers and'
+      + ' any English words the speaker used. Reply with the translation only: no quotes, notes, or alternatives.';
+    let prompt = '';
+    if (context.length) {
+      prompt += 'Earlier in the conversation (for context only, do not translate):\n'
+        + context.map(c => '- ' + c.zh + (c.en ? '  →  ' + c.en : '')).join('\n') + '\n\n';
+    }
+    prompt += 'NEW: ' + text;
+    const body = {
+      systemInstruction: { parts: [{ text: sys }] },
+      contents: [{ role: 'user', parts: [{ text: prompt }] }],
+      generationConfig: { temperature: 0.2, maxOutputTokens: 1024 },
+    };
+    // Turn off "thinking" for speed where the model supports it; drop the setting if the model rejects it.
+    if (!noThinkingCfg) body.generationConfig.thinkingConfig = { thinkingBudget: 0 };
+    const call = () => fetch(GAPI + model + ':generateContent', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'x-goog-api-key': cfg.gkey },
+      body: JSON.stringify(body),
+    });
+    let r = await call();
+    if (r.status === 400 && body.generationConfig.thinkingConfig) {
+      delete body.generationConfig.thinkingConfig;
+      noThinkingCfg = true; store.set('noThinkCfg', '1');
+      r = await call();
+    }
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok) {
+      const err = new Error((j.error && j.error.message) || ('HTTP ' + r.status));
+      err.status = r.status;
+      throw err;
+    }
+    const parts = (((j.candidates || [])[0] || {}).content || {}).parts || [];
+    const out = parts.filter(p => !p.thought).map(p => p.text || '').join('').trim();
+    if (!out) throw new Error('Empty reply from Gemini');
+    return out;
+  }
+
+  // Finished sentences: Gemini when set up, Google Translate otherwise or as a fallback.
+  async function translateFinal(zh, context) {
+    if (cfg.engine === 'gemini' && cfg.gkey && Date.now() > geminiPausedUntil) {
+      try {
+        return { text: await geminiTranslate(zh, context), by: 'Gemini' };
+      } catch (e) {
+        if (e.status === 429) {
+          geminiPausedUntil = Date.now() + 60000;
+          status('Gemini free limit reached — using Google Translate for 1 minute.', true);
+        } else if (e.status === 400 || e.status === 401 || e.status === 403) {
+          geminiPausedUntil = Date.now() + 5 * 60000;
+          status('Gemini key problem (' + e.message + ') — using Google Translate.', true);
+        } else {
+          status('Gemini error (' + e.message + ') — used Google Translate.', true);
+        }
+      }
+    }
+    return { text: await translate(zh), by: 'Google' };
+  }
+
   // ---------- transcript ----------
   const entries = [];
   function saveLog() { try { localStorage.setItem('lt_log', JSON.stringify(entries.slice(-300))); } catch {} }
   function nearBottom() { const l = $('log'); return l.scrollHeight - l.scrollTop - l.clientHeight < 120; }
   function scrollDown(force) { const l = $('log'); if (force || nearBottom()) l.scrollTop = l.scrollHeight; }
 
+  function setTag(div, e) {
+    const t = div.querySelector('.t');
+    t.querySelector('.tag') && t.querySelector('.tag').remove();
+    if (e.by) { const s = document.createElement('span'); s.className = 'tag'; s.textContent = e.by; t.appendChild(s); }
+  }
   function renderEntry(e) {
     const div = document.createElement('div');
     div.className = 'entry' + (e.en ? '' : ' pending');
@@ -201,6 +351,7 @@
     div.querySelector('.zh').style.display = cfg.showZh === '1' ? '' : 'none';
     div.querySelector('.en').textContent = e.en || 'translating…';
     div.querySelector('.t').textContent = e.time;
+    setTag(div, e);
     $('entries').appendChild(div);
     $('empty').style.display = 'none';
     return div;
@@ -210,12 +361,15 @@
     if (!zh) return;
     const stick = nearBottom();
     const e = { zh, en: '', time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }) };
+    const context = entries.slice(-4).map(c => ({ zh: c.zh, en: c.en }));
     entries.push(e);
     const div = renderEntry(e);
     if (stick) scrollDown(true);
-    e.en = await translate(zh);
+    const res = await translateFinal(zh, context);
+    e.en = res.text; e.by = res.by;
     div.classList.remove('pending');
     div.querySelector('.en').textContent = e.en;
+    setTag(div, e);
     saveLog();
     if (stick) scrollDown(true);
   }
