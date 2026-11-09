@@ -137,6 +137,12 @@
   <select id="showZh"><option value="1">Yes</option><option value="0">No (English only)</option></select>
   <label for="liveTr">Translate while still speaking</label>
   <select id="liveTr"><option value="1">Yes (faster, more requests)</option><option value="0">No (only finished sentences)</option></select>
+  <label for="chunk">Don't wait for the speaker to finish</label>
+  <select id="chunk">
+    <option value="fast">Fastest: translate short pieces (~1 s delay)</option>
+    <option value="balanced">Balanced: medium pieces</option>
+    <option value="full">Off: wait for full sentences (best accuracy)</option>
+  </select>
   <label for="theme">Theme</label>
   <select id="theme"><option value="dark">Dark</option><option value="light">Light</option></select>
   <div class="row"><button id="closeSettings">Done</button></div>
@@ -156,12 +162,13 @@
   const cfg = {
     src: store.get('src', 'zh-TW'), tgt: store.get('tgt', 'en'), fs: store.get('fs', '20'),
     showZh: store.get('showZh', '1'), liveTr: store.get('liveTr', '1'), theme: store.get('theme', 'dark'),
+    chunk: store.get('chunk', 'fast'),
     engine: store.get('engine', 'google'), gkey: store.get('gkey', ''), gmodel: store.get('gmodel', ''),
   };
   function applyCfg() {
     $('srcLang').value = cfg.src; $('tgtLang').value = cfg.tgt; $('fs').value = cfg.fs;
     $('fsVal').textContent = cfg.fs + 'px'; $('showZh').value = cfg.showZh;
-    $('liveTr').value = cfg.liveTr; $('theme').value = cfg.theme;
+    $('liveTr').value = cfg.liveTr; $('theme').value = cfg.theme; $('chunk').value = cfg.chunk;
     $('engine').value = cfg.engine; $('gkey').value = cfg.gkey;
     $('geminiBox').style.display = cfg.engine === 'gemini' ? '' : 'none';
     if (cfg.gmodel && ![...$('gmodel').options].some(o => o.value === cfg.gmodel)) {
@@ -179,7 +186,7 @@
   bind('engine', 'engine');
   bind('gmodel', 'gmodel', () => { noThinkingCfg = false; store.set('noThinkCfg', ''); });
   $('gkey').addEventListener('change', e => { cfg.gkey = e.target.value.trim(); store.set('gkey', cfg.gkey); });
-  bind('tgtLang', 'tgt'); bind('fs', 'fs'); bind('showZh', 'showZh'); bind('liveTr', 'liveTr'); bind('theme', 'theme');
+  bind('tgtLang', 'tgt'); bind('fs', 'fs'); bind('showZh', 'showZh'); bind('liveTr', 'liveTr'); bind('theme', 'theme'); bind('chunk', 'chunk');
   $('settingsBtn').onclick = () => $('settings').showModal();
   $('closeSettings').onclick = () => $('settings').close();
 
@@ -232,7 +239,7 @@
     const v = parseFloat((n.match(/gemini-(\d+(?:\.\d+)?)/) || [])[1] || '0');
     let s = v * 100;
     if (n.includes('flash')) s += 50;
-    if (n.includes('lite')) s -= 10;
+    if (n.includes('lite')) s += 10; // fastest replies, highest free limits
     if (n.includes('preview') || n.includes('exp')) s -= 100; // previews change/disappear; prefer stable
     if (n.includes('pro')) s -= 40; // slower, lower free limits
     return s;
@@ -358,7 +365,7 @@
   }
   async function addFinal(zh) {
     zh = zh.trim();
-    if (!zh) return;
+    if (!/[\p{L}\p{N}]/u.test(zh)) return; // skip empty or punctuation-only pieces
     const stick = nearBottom();
     const e = { zh, en: '', time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }) };
     const context = entries.slice(-4).map(c => ({ zh: c.zh, en: c.en }));
@@ -402,6 +409,42 @@
   // ---------- speech recognition ----------
   let rec = null, running = false, restartSoon = false, wakeLock = null, lastStart = 0, quickFails = 0;
 
+  // ---------- chunking: translate pieces while the speaker is still talking ----------
+  // [max characters before cutting a piece, ms of unchanged text (a short pause) before sending it]
+  const CHUNK = { fast: [14, 700], balanced: [26, 1000], full: [0, 0] };
+  const seg = { idx: -1, done: 0, timer: null }; // current recognition result and how many of its chars were sent
+  function resetSeg() { clearTimeout(seg.timer); seg.idx = -1; seg.done = 0; }
+  // Chinese has no spaces, so find word boundaries with the browser's word segmenter.
+  const wordSeg = (window.Intl && Intl.Segmenter) ? new Intl.Segmenter('zh', { granularity: 'word' }) : null;
+  const JOINERS = /^(還有|然後|但是|可是|不過|所以|因為|因此|如果|而且|或者|還是|就是|那麼|另外|接著|其實|雖然|只是|並且|同時|于是|於是)/;
+  function cutPoint(text, maxLen) {
+    const head = text.slice(0, text.length - 4); // the last few characters are often still being corrected
+    const marks = [...head.matchAll(/[，。？！、；,.?!;\s]/g)].map(x => x.index + 1).filter(p => p >= 6);
+    if (marks.length) return marks[marks.length - 1];
+    if (!wordSeg) return Math.min(head.length, maxLen);
+    const bounds = [...wordSeg.segment(head)].map(s => s.index).filter(p => p >= 6);
+    // best: just before a linking word like 還有 / 但是 / 所以, otherwise the last word boundary
+    const nice = bounds.filter(p => JOINERS.test(text.slice(p)));
+    if (nice.length) return nice[nice.length - 1];
+    return bounds.length ? bounds[bounds.length - 1] : Math.min(head.length, maxLen);
+  }
+  function commitChunk(part) {
+    clearTimeout(seg.timer);
+    if (!part.trim()) return;
+    seg.done += part.length;
+    clearLive();
+    addFinal(part);
+  }
+  function maybeChunk(text) {
+    const [maxLen, pauseMs] = CHUNK[cfg.chunk] || CHUNK.fast;
+    clearTimeout(seg.timer);
+    if (!maxLen) return;
+    if (text.length >= maxLen + 4) { commitChunk(text.slice(0, cutPoint(text, maxLen))); return; }
+    if (text.trim().length >= 4) {
+      seg.timer = setTimeout(() => { if (lastLiveText === text) commitChunk(text); }, pauseMs);
+    }
+  }
+
   async function keepAwake() {
     try { if ('wakeLock' in navigator) wakeLock = await navigator.wakeLock.request('screen'); } catch {}
   }
@@ -421,10 +464,12 @@
       let interim = '';
       for (let i = ev.resultIndex; i < ev.results.length; i++) {
         const r = ev.results[i];
-        if (r.isFinal) { clearLive(); addFinal(r[0].transcript); }
-        else interim += r[0].transcript;
+        if (i !== seg.idx) { clearTimeout(seg.timer); seg.idx = i; seg.done = 0; }
+        const rest = r[0].transcript.slice(seg.done); // skip the part already translated as a chunk
+        if (r.isFinal) { clearTimeout(seg.timer); clearLive(); addFinal(rest); seg.idx = i + 1; seg.done = 0; }
+        else interim += rest;
       }
-      if (interim) showLive(interim);
+      if (interim) { showLive(interim); maybeChunk(interim); }
       quickFails = 0;
     };
     rec.onerror = (ev) => {
@@ -441,14 +486,14 @@
         status('Speech error: ' + ev.error, true);
       }
     };
-    rec.onstart = () => { lastStart = Date.now(); status('Listening (' + $('srcLang').selectedOptions[0].text + ')…'); };
+    rec.onstart = () => { lastStart = Date.now(); resetSeg(); status('Listening (' + $('srcLang').selectedOptions[0].text + ')…'); };
     rec.onend = () => {
       // flush any unfinished interim text as a sentence
       if (lastLiveText) { const t = lastLiveText; clearLive(); addFinal(t); }
       if (running) {
         if (Date.now() - lastStart < 1000) quickFails++;
         if (quickFails > 8) { status('Speech recognition keeps stopping. Tap Start to try again.', true); stop(); return; }
-        setTimeout(() => { if (running) { try { startRec(); } catch {} } }, restartSoon ? 50 : 150 + quickFails * 200);
+        setTimeout(() => { if (running) { try { startRec(); } catch {} } }, (restartSoon || !quickFails) ? 0 : 150 + quickFails * 200); // restart at once so no words are missed
         restartSoon = false;
       }
     };
