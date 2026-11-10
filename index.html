@@ -101,6 +101,7 @@
 </header>
 
 <div id="status">Tap Start and put your phone near the speaker.</div>
+<div id="diag" style="font-size:12px;color:var(--muted);padding:0 14px 4px;background:var(--panel)"></div>
 
 <main id="log">
   <div id="empty">
@@ -608,7 +609,7 @@
     div.dataset.turn = turnNo;
     div.innerHTML = '<div class="zh"></div><div class="en"></div><div class="t"></div>';
     div.querySelector('.zh').textContent = e.zh;
-    div.querySelector('.zh').style.display = cfg.showZh === '1' ? '' : 'none';
+    div.querySelector('.zh').style.display = cfg.showZh === '1' || (tf() && !e.en) ? '' : 'none';
     div.querySelector('.en').textContent = e.en || 'translating…';
     div.querySelector('.t').textContent = e.time;
     setTag(div, e);
@@ -703,7 +704,7 @@
     if (!zh.trim()) { live.innerHTML = ''; lastLiveText = ''; return; }
     if (!live.firstChild) live.innerHTML = '<div class="zh"></div><div class="en"></div>';
     live.querySelector('.zh').textContent = zh + ' …';
-    live.querySelector('.zh').style.display = cfg.showZh === '1' ? '' : 'none';
+    live.querySelector('.zh').style.display = cfg.showZh === '1' || tf() ? '' : 'none'; // transcribe first: always show what is heard
     $('empty').style.display = 'none';
     lastLiveText = zh;
     if (tf()) {
@@ -963,10 +964,34 @@
     return latin >= 10 && latin > han * 3;
   }
 
+  // ---------- listening check: shows step by step whether the phone's speech recognition is getting anything ----------
+  const dg = { starts: 0, audio: false, sound: 0, speech: 0, results: 0, words: '', err: '', errAt: 0, lastResultAt: 0, startedAt: 0 };
+  function resetDiag() { Object.assign(dg, { starts: 0, audio: false, sound: 0, speech: 0, results: 0, words: '', err: '', errAt: 0, lastResultAt: 0, startedAt: Date.now() }); showDiag(); }
+  function showDiag() {
+    if (!running) { $('diag').textContent = ''; return; }
+    const ok = b => b ? '✅' : '⬜';
+    let hint = '';
+    const secs = (Date.now() - dg.startedAt) / 1000;
+    if (dg.err === 'not-allowed' || dg.err === 'service-not-allowed') hint = 'Microphone permission is blocked for this page.';
+    else if (dg.err === 'network') hint = 'The phone cannot reach Google\'s speech service: check internet / Wi-Fi.';
+    else if (dg.err === 'audio-capture') hint = 'No microphone available: another app (voice recorder, call, Zoom, LINE) may be using it. Close it and tap Start again.';
+    else if (secs > 8 && !dg.audio) hint = 'The microphone never opened. Close other apps that use the mic, then tap Stop and Start.';
+    else if (secs > 8 && !dg.speech && !dg.results) hint = 'The mic is open but no speech is detected: hold the phone closer to the speaker, or check that nothing else is recording.';
+    else if (secs > 8 && dg.speech && !dg.results) hint = 'Speech is heard but no words come back from the speech service (slow internet, or Google speech service missing on this phone).';
+    $('diag').textContent = 'Check: ' + ok(dg.audio) + ' mic open  ' + ok(dg.speech) + ' speech heard  ' + ok(dg.results) + ' words (' + dg.results + ')'
+      + '  · restarts ' + Math.max(0, dg.starts - 1) + (dg.err ? '  · last error: ' + dg.err : '')
+      + (hint ? '\n⚠️ ' + hint : '');
+    $('diag').style.whiteSpace = 'pre-wrap';
+  }
+  setInterval(showDiag, 1000);
+
   function startRec() {
     rec = new SR();
+    dg.starts++;
+    rec.onaudiostart = () => { dg.audio = true; showDiag(); };
+    rec.onsoundstart = () => { dg.sound++; };
     rec.lang = activeLang;
-    rec.onspeechstart = () => { ls.speechAt = Date.now(); };
+    rec.onspeechstart = () => { ls.speechAt = Date.now(); dg.speech++; };
     rec.onspeechend = () => { ls.speechEndAt = Date.now(); };
     rec.interimResults = true;
     // Android Chrome's continuous mode repeats text; short sessions + auto-restart work better there.
@@ -977,6 +1002,7 @@
       const nowMs = performance.now();
       if (lastSpeechAt && nowMs - lastSpeechAt > turnGapMs()) markNewTurn();
       lastSpeechAt = nowMs; voice.loudNoWords = 0;
+      dg.results++; dg.speech = dg.speech || 1;
       let interim = '', heardText = '', lowConfidence = false;
       clearTimeout(paraTimer); // still talking: keep the paragraph open
       for (let i = ev.resultIndex; i < ev.results.length; i++) {
@@ -1000,6 +1026,7 @@
       }
     };
     rec.onerror = (ev) => {
+      if (ev.error !== 'aborted') { dg.err = ev.error; dg.errAt = Date.now(); }
       if (ev.error === 'no-speech' || ev.error === 'aborted') return;
       if (ev.error === 'audio-capture' && voice.ctx) { voiceBroken(); return; }
       if (ev.error === 'not-allowed' || ev.error === 'service-not-allowed') {
@@ -1039,7 +1066,7 @@
       status('This browser has no speech recognition. Use Chrome (Android/PC), Edge (PC) or Safari (iPhone).', true);
       return;
     }
-    running = true; quickFails = 0; resetCadence(); errShownAt = 0;
+    running = true; quickFails = 0; resetCadence(); errShownAt = 0; resetDiag();
     activeLang = cfg.src; Object.assign(ls, { speechAt: 0, speechEndAt: 0, resultAt: 0, flippedAt: 0 });
     lastSpeechAt = 0; newTurnPending = true; // a new listening session starts a new block
     // A new meeting starts if nothing was said in the last 30 minutes.
