@@ -94,6 +94,7 @@
     <option value="zh-TW">國語 (台灣) · Taiwan Mandarin</option>
     <option value="zh-CN">普通话 · Mainland Mandarin</option>
     <option value="yue-Hant-HK">廣東話 · Cantonese</option>
+    <option value="en-US">English → 中文</option>
   </select>
   <button id="settingsBtn" aria-label="Settings">⚙️</button>
 </header>
@@ -287,16 +288,26 @@
 
   // ---------- translation (free endpoints, Google first, MyMemory fallback) ----------
   const cache = new Map();
+  // Language the translation goes into. When someone speaks the same language as the target
+  // (e.g. English speech while "Translate into" is English), translate into Traditional Chinese instead.
+  function outLang() {
+    const base = s => s.split('-')[0];
+    if (base(cfg.src) === 'en' && base(cfg.tgt) === 'en') return 'zh-TW';
+    if (cfg.src === cfg.tgt) return 'en';
+    return cfg.tgt;
+  }
+  const isSpaced = () => !/^(zh|yue|ja|ko)/.test(cfg.src); // languages that put spaces between words
   async function translate(text) {
     text = text.trim();
     if (!text) return '';
-    const key = cfg.src + '|' + cfg.tgt + '|' + text;
+    const tl = outLang();
+    const key = cfg.src + '|' + tl + '|' + text;
     if (cache.has(key)) return cache.get(key);
-    const sl = cfg.src.startsWith('yue') ? 'zh-TW' : cfg.src;
+    const sl = cfg.src.startsWith('yue') ? 'zh-TW' : cfg.src.startsWith('en') ? 'en' : cfg.src;
     let out = '';
     try {
       const u = 'https://translate.googleapis.com/translate_a/single?client=gtx&dt=t'
-        + '&sl=' + encodeURIComponent(sl) + '&tl=' + encodeURIComponent(cfg.tgt) + '&q=' + encodeURIComponent(text);
+        + '&sl=' + encodeURIComponent(sl) + '&tl=' + encodeURIComponent(tl) + '&q=' + encodeURIComponent(text);
       const r = await fetch(u);
       if (!r.ok) throw new Error('HTTP ' + r.status);
       const j = await r.json();
@@ -304,7 +315,7 @@
     } catch (e) {
       try {
         const u = 'https://api.mymemory.translated.net/get?q=' + encodeURIComponent(text)
-          + '&langpair=' + encodeURIComponent(sl + '|' + cfg.tgt);
+          + '&langpair=' + encodeURIComponent(sl + '|' + tl);
         const r = await fetch(u);
         const j = await r.json();
         out = (j.responseData && j.responseData.translatedText) || '';
@@ -322,7 +333,8 @@
   const GAPI = 'https://generativelanguage.googleapis.com/v1beta/';
   const LANG_NAMES = { 'en': 'English', 'zh-TW': 'Traditional Chinese (Taiwan)', 'tl': 'Filipino', 'ja': 'Japanese',
     'ko': 'Korean', 'vi': 'Vietnamese', 'id': 'Indonesian' };
-  const SRC_NAMES = { 'zh-TW': 'Taiwan Mandarin (Traditional Chinese)', 'zh-CN': 'Mainland Mandarin', 'yue-Hant-HK': 'Cantonese' };
+  const SRC_NAMES = { 'zh-TW': 'Taiwan Mandarin (Traditional Chinese)', 'zh-CN': 'Mainland Mandarin', 'yue-Hant-HK': 'Cantonese',
+    'en-US': 'English' };
   let noThinkingCfg = store.get('noThinkCfg', '') === '1';
   const pausedUntil = {}; // per translator: after a limit or key error, use Google Translate until this time
 
@@ -470,12 +482,15 @@
 
   function aiTranslate(eng, text, context) {
     const p = PROV[eng];
-    const tgt = LANG_NAMES[cfg.tgt] || cfg.tgt;
-    const sys = 'You are a live interpreter at a meeting in Taiwan. The input is ' + (SRC_NAMES[cfg.src] || 'Chinese')
+    const tgt = LANG_NAMES[outLang()] || outLang();
+    const sys = 'You are a live interpreter at a work meeting. The input is ' + (SRC_NAMES[cfg.src] || 'Chinese')
       + ' speech captured by automatic speech recognition, so it may have missing punctuation, homophone mistakes, or'
-      + ' wrongly recognized names; use the context to infer what the speaker most likely meant. Translate ONLY the line'
-      + ' marked NEW into natural, fluent ' + tgt + ', the way a professional interpreter would say it. Keep names, numbers and'
-      + ' any English words the speaker used. Reply with the translation only: no quotes, notes, or alternatives.';
+      + ' wrongly recognized names; use the context only to fix such recognition mistakes. Translate ONLY the line'
+      + ' marked NEW into clear, plain ' + tgt + '. Be faithful and neutral: keep the speaker\'s meaning, tone and level of'
+      + ' formality exactly. Do NOT add emotion, emphasis, drama, opinions, or details that were not said; do not exaggerate'
+      + ' or soften; prefer simple everyday wording over vivid or literary words. If a piece is incomplete, translate just'
+      + ' what is there without finishing the thought. Keep names, numbers and any words the speaker said in ' + tgt + '.'
+      + ' Reply with the translation only: no quotes, notes, or alternatives.';
     let prompt = '';
     if (context.length) {
       prompt += 'Earlier in the conversation (for context only, do not translate):\n'
@@ -680,7 +695,10 @@
     if (cad.gaps.length < 6) return m.defPause; // not enough speech heard yet
     return Math.round(Math.min(1500, Math.max(350, median(cad.gaps) * m.factor)));
   }
-  function maxChars(m) { return Math.round(Math.min(m.maxLen, Math.max(m.minLen, cad.rate * m.secs))); }
+  function maxChars(m) {
+    const k = isSpaced() ? 2.5 : 1; // English words use more letters per second than Chinese characters
+    return Math.round(Math.min(m.maxLen * k, Math.max(m.minLen * k, cad.rate * m.secs)));
+  }
   function showCadence() {
     const m = CHUNK[cfg.chunk];
     $('cadInfo').textContent = !m ? 'Waits for full sentences.'
@@ -688,7 +706,7 @@
       : 'Speaker rhythm: translates after a ' + (pauseMs(m) / 1000).toFixed(2) + ' s pause, or every ~' + maxChars(m)
         + ' characters if they don\'t pause (' + cad.rate.toFixed(1) + ' characters/s).';
   }
-  const TRAILING_JOINER = /(還有|然後|但是|可是|不過|所以|因為|因此|如果|而且|或者|還是|就是|那麼|另外|接著|其實|雖然|只是|並且|的話|的|跟|和|在|把|被|對|是)$/;
+  const TRAILING_JOINER = /(還有|然後|但是|可是|不過|所以|因為|因此|如果|而且|或者|還是|就是|那麼|另外|接著|其實|雖然|只是|並且|的話|的|跟|和|在|把|被|對|是|\b(and|but|so|because|the|a|an|to|of|in|on|that|with|for|or|if|is|are|was|we|I|you|our|my|your))$/i;
   const seg = { idx: -1, done: 0, timer: null }; // current recognition result and how many of its chars were sent
   function resetSeg() { clearTimeout(seg.timer); seg.idx = -1; seg.done = 0; }
   // Chinese has no spaces, so find word boundaries with the browser's word segmenter.
