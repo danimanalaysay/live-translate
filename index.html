@@ -152,6 +152,13 @@
   <input type="range" id="fs" min="14" max="40" step="1">
   <label for="showZh">Show original Chinese</label>
   <select id="showZh"><option value="1">Yes</option><option value="0">No (English only)</option></select>
+  <label for="flow">How to work</label>
+  <select id="flow">
+    <option value="transcribe">Transcribe first, then translate each paragraph (most reliable: lectures, seminars)</option>
+    <option value="live">Translate live, piece by piece (faster, more mistakes)</option>
+  </select>
+  <div id="flowInfo" style="font-size:12px;color:var(--muted);margin-top:4px"></div>
+  <div id="liveOnly">
   <label for="liveTr">Translate while still speaking</label>
   <select id="liveTr"><option value="1">Yes (faster, more requests)</option><option value="0">No (only finished sentences)</option></select>
   <label for="chunk">When to translate while someone is talking</label>
@@ -171,6 +178,7 @@
     <option value="1">Switch to English automatically (may miss the first words)</option>
     <option value="0">Off: listen for one language only</option>
   </select>
+  </div>
   <label for="turns">Separate different speakers</label>
   <select id="turns">
     <option value="voice">By voice and long pauses (experimental)</option>
@@ -220,14 +228,21 @@
     src: store.get('src', 'zh-TW'), tgt: store.get('tgt', 'en'), fs: store.get('fs', '20'),
     showZh: store.get('showZh', '1'), liveTr: store.get('liveTr', '1'), theme: store.get('theme', 'dark'),
     chunk: store.get('chunk', 'fast'), turns: store.get('turns', 'voice'), polish: store.get('polish', '1'),
-    autoEn: store.get('autoEn', '1'),
+    autoEn: store.get('autoEn', '1'), flow: store.get('flow', 'transcribe'),
     engine: store.get('engine', 'google'), gkey: store.get('gkey', ''), gmodel: store.get('gmodel', ''),
     okey: store.get('okey', ''), omodel: store.get('omodel', ''), ckey: store.get('ckey', ''), cmodel: store.get('cmodel', ''),
   };
+  // "Transcribe first": show the original words as heard, translate whole paragraphs when the speaker pauses.
+  const tf = () => cfg.flow !== 'live';
   function applyCfg() {
     $('srcLang').value = cfg.src; $('tgtLang').value = cfg.tgt; $('fs').value = cfg.fs;
     $('fsVal').textContent = cfg.fs + 'px'; $('showZh').value = cfg.showZh;
     $('liveTr').value = cfg.liveTr; $('theme').value = cfg.theme; $('chunk').value = cfg.chunk; $('turns').value = cfg.turns; $('polish').value = cfg.polish; $('autoEn').value = cfg.autoEn;
+    $('flow').value = cfg.flow;
+    $('liveOnly').style.display = tf() ? 'none' : '';
+    $('flowInfo').textContent = tf()
+      ? 'The original words appear first, as they are heard. When the speaker pauses (or after about 20 seconds of non-stop talking), the whole paragraph is translated at once, with the paragraphs before it as context. Listens for one language only.'
+      : 'Short pieces are translated while the speaker is still talking.';
     $('engine').value = cfg.engine;
     const p = PROV[cfg.engine];
     $('aiBox').style.display = p ? '' : 'none';
@@ -255,6 +270,12 @@
   });
   bind('srcLang', 'src', () => { activeLang = cfg.src; if (running) { restartSoon = true; rec && rec.abort(); } });
   bind('autoEn', 'autoEn', () => { if (activeLang !== cfg.src) flipLang(cfg.src, true); });
+  bind('flow', 'flow', () => {
+    closeStatement();
+    if (tf() && activeLang !== cfg.src) flipLang(cfg.src, true);
+    stopVoice(); if (running) startVoice();
+    showTurnInfo();
+  });
   bind('engine', 'engine');
   $('amodel').addEventListener('input', e => {
     const p = PROV[cfg.engine]; if (!p) return;
@@ -496,7 +517,7 @@
   function aiTranslate(eng, text, context, lang = cfg.src) {
     const p = PROV[eng];
     const tgt = LANG_NAMES[outLang(lang)] || outLang(lang);
-    const sys = 'You are a live interpreter at a work meeting. The input is ' + (SRC_NAMES[lang] || 'Chinese')
+    const sys = 'You are a live interpreter at a work meeting or class. The input is ' + (SRC_NAMES[lang] || 'Chinese')
       + ' speech captured by automatic speech recognition, so it may have missing punctuation, homophone mistakes, or'
       + ' wrongly recognized names; use the context only to fix such recognition mistakes. Translate ONLY the line'
       + ' marked NEW into clear, plain ' + tgt + '. Be faithful and neutral: keep the speaker\'s meaning, tone and level of'
@@ -609,6 +630,16 @@
     entries.push(e);
     const div = renderEntry(e);
     stmt.push({ e, div });
+    if (tf()) {
+      // transcribe first: the translation comes when the paragraph ends (pause, long talk, new speaker, stop)
+      div.querySelector('.en').textContent = '…'; e.awaiting = true;
+      const n = stmt.reduce((k, x) => k + x.e.zh.length, 0);
+      clearTimeout(paraTimer);
+      if (n >= (isSpaced() ? 220 : 90)) closeStatement();
+      else paraTimer = setTimeout(closeStatement, PARA_PAUSE);
+      if (stick) scrollDown(true);
+      return;
+    }
     if (stmt.reduce((n, x) => n + x.e.zh.length, 0) > 200) closeStatement(); // very long monologue: polish what we have
     if (stick) scrollDown(true);
     const res = await translateFinal(zh, context, lang);
@@ -625,14 +656,19 @@
   // ---------- whole statements: when the speaker finishes, re-translate the quick pieces together ----------
   let stmt = []; // pieces of the statement being spoken: [{ e, div }]
   let meetingId = 0;
+  let paraTimer = null;
+  const PARA_PAUSE = 1500; // ms of silence after a sentence that ends a paragraph
   function closeStatement() {
+    clearTimeout(paraTimer);
     const g = stmt; stmt = [];
-    if (g.length >= 2 && cfg.polish === '1') polishStatement(g);
+    const untranslated = g.some(x => x.e.awaiting);
+    if (untranslated ? g.length >= 1 : (g.length >= 2 && cfg.polish === '1')) polishStatement(g);
   }
   async function polishStatement(g) {
     const lang = g[0].e.lang || cfg.src;
     const sep = /^(zh|yue|ja)/.test(lang) ? '' : ' ';
-    const zh = g.map(x => x.e.zh).join(sep);
+    // whole sentences (transcribe first): keep a sentence break between them so the paragraph reads well
+    const zh = g.map((x, i) => x.e.zh + (x.e.awaiting && i < g.length - 1 && !/[，。？！,.?!]$/.test(x.e.zh) ? (sep ? '.' : '。') : '')).join(sep);
     const first = entries.indexOf(g[0].e);
     if (first < 0) return;
     const context = entries.slice(Math.max(0, first - 4), first).map(c => ({ zh: c.zh, en: c.en }));
@@ -641,7 +677,7 @@
     // only merge if the pieces are still there, side by side (not cleared meanwhile)
     const at = entries.indexOf(g[0].e);
     if (at < 0 || g.some((x, i) => entries[at + i] !== x.e)) return;
-    const m = { zh, en: res.text, by: res.by + (res.same ? '' : ' · whole'), turn: g[0].e.turn, mt: g[0].e.mt, ts: g[0].e.ts,
+    const m = { zh, en: res.text, by: res.by + (res.same || g.length < 2 ? '' : tf() ? ' · paragraph' : ' · whole'), turn: g[0].e.turn, mt: g[0].e.mt, ts: g[0].e.ts,
       time: g[0].e.time, lang, same: !!res.same };
     g.forEach(x => { x.e.merged = true; });
     entries.splice(at, g.length, m);
@@ -670,7 +706,9 @@
     live.querySelector('.zh').style.display = cfg.showZh === '1' ? '' : 'none';
     $('empty').style.display = 'none';
     lastLiveText = zh;
-    if (cfg.liveTr === '1' && !liveTimer) {
+    if (tf()) {
+      live.querySelector('.en').textContent = '';
+    } else if (cfg.liveTr === '1' && !liveTimer) {
       liveTimer = setTimeout(async () => {
         liveTimer = null;
         const seq = ++liveSeq, text = lastLiveText;
@@ -753,7 +791,7 @@
   function maybeChunk(text) {
     const m = CHUNK[cfg.chunk];
     clearTimeout(seg.timer);
-    if (!m) return;
+    if (!m || tf()) return;
     noteUpdate(text.length);
     if ($('settings').open) showCadence();
     const maxLen = maxChars(m);
@@ -786,19 +824,19 @@
     newTurnPending = true;
   }
   // A silence much longer than this speaker's normal pause usually means someone else talks next.
-  const turnGapMs = () => Math.max(1500, 2.5 * pauseMs(CHUNK[cfg.chunk] || CHUNK.fast));
+  const turnGapMs = () => tf() ? 4000 : Math.max(1500, 2.5 * pauseMs(CHUNK[cfg.chunk] || CHUNK.fast));
 
   // Voice change: a second, light listener on the mic follows the voice pitch of whoever is talking.
   const voice = { ctx: null, stream: null, timer: null, prof: [], utt: [], checked: false, quiet: 0, noise: 0.01, loudNoWords: 0, ds: null };
   function showTurnInfo() {
     $('turnInfo').textContent = cfg.turns === 'off' ? 'Everything is shown as one stream.'
-      : cfg.turns === 'pause' ? 'A new block starts after a long silence.'
+      : cfg.turns === 'pause' || tf() ? 'A new block starts after a long silence.' + (tf() && cfg.turns === 'voice' ? ' (Voice detection is only used in "Translate live" mode, so it never competes with transcription for the microphone.)' : '')
       : store.get('voiceBroken', '') === '1' ? 'Voice detection was turned off: this phone could not share the microphone with speech recognition. Using long pauses only. (Pick this option again to retry.)'
       : 'A new block starts when the voice clearly changes (for example a man then a woman) or after a long silence. Similar voices may not be told apart.'
         + (voice.ctx ? ' Listening to voices ✓' : '');
   }
   async function startVoice() {
-    if (cfg.turns !== 'voice' || store.get('voiceBroken', '') === '1' || !navigator.mediaDevices || voice.ctx) return;
+    if (cfg.turns !== 'voice' || tf() || store.get('voiceBroken', '') === '1' || !navigator.mediaDevices || voice.ctx) return;
     try {
       voice.stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false } });
       if (!running) { stopVoice(); return; }
@@ -892,7 +930,7 @@
   // clearly talking but no Mandarin words come out (or the words come out as English), switch to English
   // for a while, then come back to Mandarin as soon as English stops.
   const ls = { speechAt: 0, speechEndAt: 0, resultAt: 0, flippedAt: 0 };
-  const autoOn = () => cfg.autoEn === '1' && /^(zh|yue)/.test(cfg.src);
+  const autoOn = () => !tf() && cfg.autoEn === '1' && /^(zh|yue)/.test(cfg.src);
   function langLabel() {
     return activeLang === cfg.src ? $('srcLang').selectedOptions[0].text : 'English · switched automatically';
   }
@@ -940,6 +978,7 @@
       if (lastSpeechAt && nowMs - lastSpeechAt > turnGapMs()) markNewTurn();
       lastSpeechAt = nowMs; voice.loudNoWords = 0;
       let interim = '', heardText = '', lowConfidence = false;
+      clearTimeout(paraTimer); // still talking: keep the paragraph open
       for (let i = ev.resultIndex; i < ev.results.length; i++) {
         const r = ev.results[i];
         if (i !== seg.idx) { clearTimeout(seg.timer); seg.idx = i; seg.done = 0; }
@@ -949,7 +988,7 @@
         if (r.isFinal && activeLang !== cfg.src && r[0].confidence > 0 && r[0].confidence < 0.3) {
           lowConfidence = true; seg.idx = i + 1; seg.done = 0; continue;
         }
-        if (r.isFinal) { clearTimeout(seg.timer); clearLive(); addFinal(rest); closeStatement(); seg.idx = i + 1; seg.done = 0; }
+        if (r.isFinal) { clearTimeout(seg.timer); clearLive(); addFinal(rest); if (!tf()) closeStatement(); seg.idx = i + 1; seg.done = 0; }
         else interim += rest;
       }
       if (heardText.trim() && !lowConfidence) { ls.resultAt = Date.now(); voice.loudSinceWords = 0; }
@@ -978,12 +1017,13 @@
     rec.onstart = () => {
       lastStart = Date.now(); resetSeg();
       if ($('status').classList.contains('err') && Date.now() - errShownAt < 8000) return; // keep a fresh warning visible
-      status('Listening (' + langLabel() + ') · ' + (sameAsTarget(activeLang) ? 'shown as said' : 'translating with ' + translatorName()) + '…');
+      status('Listening (' + langLabel() + ') · ' + (sameAsTarget(activeLang) ? 'shown as said'
+        : (tf() ? 'transcribing, then translating each paragraph with ' : 'translating with ') + translatorName()) + '…');
     };
     rec.onend = () => {
       // flush any unfinished interim text as a sentence
       if (lastLiveText) { const t = lastLiveText; clearLive(); addFinal(t); }
-      closeStatement();
+      if (!tf() || !running) closeStatement(); // phones end listening after every sentence: keep the paragraph open
       if (running) {
         if (Date.now() - lastStart < 1000) quickFails++;
         if (quickFails > 8) { status('Speech recognition keeps stopping. Tap Start to try again.', true); stop(); return; }
