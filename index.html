@@ -139,12 +139,13 @@
   <select id="showZh"><option value="1">Yes</option><option value="0">No (English only)</option></select>
   <label for="liveTr">Translate while still speaking</label>
   <select id="liveTr"><option value="1">Yes (faster, more requests)</option><option value="0">No (only finished sentences)</option></select>
-  <label for="chunk">Don't wait for the speaker to finish</label>
+  <label for="chunk">When to translate while someone is talking</label>
   <select id="chunk">
-    <option value="fast">Fastest: translate short pieces (~1 s delay)</option>
-    <option value="balanced">Balanced: medium pieces</option>
+    <option value="fast">Smart, quick: at the speaker's own short pauses</option>
+    <option value="balanced">Smart, longer pieces: waits for bigger pauses</option>
     <option value="full">Off: wait for full sentences (best accuracy)</option>
   </select>
+  <div id="cadInfo" style="font-size:12px;color:var(--muted);margin-top:4px">Learns each speaker's rhythm: a pause means a gap clearly longer than how they normally talk.</div>
   <label for="theme">Theme</label>
   <select id="theme"><option value="dark">Dark</option><option value="light">Light</option></select>
   <div class="row"><button id="closeSettings">Done</button></div>
@@ -208,8 +209,8 @@
     const p = PROV[cfg.engine]; if (!p) return;
     cfg[p.keyKey] = e.target.value.trim(); store.set(p.keyKey, cfg[p.keyKey]);
   });
-  bind('tgtLang', 'tgt'); bind('fs', 'fs'); bind('showZh', 'showZh'); bind('liveTr', 'liveTr'); bind('theme', 'theme'); bind('chunk', 'chunk');
-  $('settingsBtn').onclick = () => $('settings').showModal();
+  bind('tgtLang', 'tgt'); bind('fs', 'fs'); bind('showZh', 'showZh'); bind('liveTr', 'liveTr'); bind('theme', 'theme'); bind('chunk', 'chunk', () => showCadence());
+  $('settingsBtn').onclick = () => { showCadence(); $('settings').showModal(); };
   $('closeSettings').onclick = () => $('settings').close();
 
   // ---------- status ----------
@@ -538,13 +539,45 @@
   let rec = null, running = false, restartSoon = false, wakeLock = null, lastStart = 0, quickFails = 0;
 
   // ---------- chunking: translate pieces while the speaker is still talking ----------
-  // [max characters before cutting a piece, ms of unchanged text (a short pause) before sending it]
-  const CHUNK = { fast: [14, 700], balanced: [26, 1000], full: [0, 0] };
+  // Per mode: how many times longer than the speaker's normal gap between words counts as a pause,
+  // the pause to use before enough speech has been heard, and the longest piece in seconds of their speech.
+  const CHUNK = {
+    fast: { factor: 2.3, defPause: 700, secs: 3, minLen: 12, maxLen: 24 },
+    balanced: { factor: 3.2, defPause: 1000, secs: 5, minLen: 18, maxLen: 36 },
+    full: null,
+  };
+
+  // ---------- cadence: learn how this speaker talks, to tell a real pause from the normal gap between words ----------
+  const cad = { last: 0, lastLen: 0, gaps: [], rate: 4.5 }; // rate = characters per second
+  function resetCadence() { cad.last = 0; cad.lastLen = 0; cad.gaps = []; cad.rate = 4.5; showCadence(); }
+  function noteUpdate(len) {
+    const now = performance.now(), gap = now - cad.last;
+    if (cad.last && len > cad.lastLen && gap > 30 && gap < 2500) {
+      cad.gaps.push(gap); if (cad.gaps.length > 40) cad.gaps.shift(); // recent words only, so it adapts when someone else talks
+      const r = (len - cad.lastLen) / (gap / 1000);
+      if (r > 0.5 && r < 15) cad.rate = cad.rate * 0.85 + r * 0.15;
+    }
+    cad.last = now; cad.lastLen = len;
+  }
+  function median(a) { const s = [...a].sort((x, y) => x - y); return s[Math.floor(s.length / 2)]; }
+  function pauseMs(m) {
+    if (cad.gaps.length < 6) return m.defPause; // not enough speech heard yet
+    return Math.round(Math.min(1500, Math.max(350, median(cad.gaps) * m.factor)));
+  }
+  function maxChars(m) { return Math.round(Math.min(m.maxLen, Math.max(m.minLen, cad.rate * m.secs))); }
+  function showCadence() {
+    const m = CHUNK[cfg.chunk];
+    $('cadInfo').textContent = !m ? 'Waits for full sentences.'
+      : cad.gaps.length < 6 ? 'Learning the speaker\'s rhythm… (starts with a ' + (m.defPause / 1000) + ' s pause)'
+      : 'Speaker rhythm: translates after a ' + (pauseMs(m) / 1000).toFixed(2) + ' s pause, or every ~' + maxChars(m)
+        + ' characters if they don\'t pause (' + cad.rate.toFixed(1) + ' characters/s).';
+  }
+  const TRAILING_JOINER = /(還有|然後|但是|可是|不過|所以|因為|因此|如果|而且|或者|還是|就是|那麼|另外|接著|其實|雖然|只是|並且|的話|的|跟|和|在|把|被|對|是)$/;
   const seg = { idx: -1, done: 0, timer: null }; // current recognition result and how many of its chars were sent
   function resetSeg() { clearTimeout(seg.timer); seg.idx = -1; seg.done = 0; }
   // Chinese has no spaces, so find word boundaries with the browser's word segmenter.
   const wordSeg = (window.Intl && Intl.Segmenter) ? new Intl.Segmenter('zh', { granularity: 'word' }) : null;
-  const JOINERS = /^(還有|然後|但是|可是|不過|所以|因為|因此|如果|而且|或者|還是|就是|那麼|另外|接著|其實|雖然|只是|並且|同時|于是|於是)/;
+  const JOINERS = /^(還有|然後|但是|可是|不過|所以|因為|因此|如果|而且|或者|還是|就是|那麼|另外|接著|其實|雖然|只是|並且|同時|于是|於是|最後|首先|接下來|再來|第二|第三)/;
   function cutPoint(text, maxLen) {
     const head = text.slice(0, text.length - 4); // the last few characters are often still being corrected
     const marks = [...head.matchAll(/[，。？！、；,.?!;\s]/g)].map(x => x.index + 1).filter(p => p >= 6);
@@ -552,7 +585,8 @@
     if (!wordSeg) return Math.min(head.length, maxLen);
     const bounds = [...wordSeg.segment(head)].map(s => s.index).filter(p => p >= 6);
     // best: just before a linking word like 還有 / 但是 / 所以, otherwise the last word boundary
-    const nice = bounds.filter(p => JOINERS.test(text.slice(p)));
+    // (only linking words in the second half, so the piece isn't cut too short and the rest left too long)
+    const nice = bounds.filter(p => p >= maxLen / 2 && JOINERS.test(text.slice(p)));
     if (nice.length) return nice[nice.length - 1];
     return bounds.length ? bounds[bounds.length - 1] : Math.min(head.length, maxLen);
   }
@@ -564,12 +598,18 @@
     addFinal(part);
   }
   function maybeChunk(text) {
-    const [maxLen, pauseMs] = CHUNK[cfg.chunk] || CHUNK.fast;
+    const m = CHUNK[cfg.chunk];
     clearTimeout(seg.timer);
-    if (!maxLen) return;
+    if (!m) return;
+    noteUpdate(text.length);
+    if ($('settings').open) showCadence();
+    const maxLen = maxChars(m);
+    // Talking without a pause: cut at a word boundary once the piece is long.
     if (text.length >= maxLen + 4) { commitChunk(text.slice(0, cutPoint(text, maxLen))); return; }
     if (text.trim().length >= 4) {
-      seg.timer = setTimeout(() => { if (lastLiveText === text) commitChunk(text); }, pauseMs);
+      // A pause after "but", "because", "the" … usually means the speaker is not done: wait longer.
+      const wait = pauseMs(m) * (TRAILING_JOINER.test(text.trim()) ? 1.8 : 1);
+      seg.timer = setTimeout(() => { if (lastLiveText === text) commitChunk(text); }, wait);
     }
   }
 
@@ -633,7 +673,7 @@
       status('This browser has no speech recognition. Use Chrome (Android/PC), Edge (PC) or Safari (iPhone).', true);
       return;
     }
-    running = true; quickFails = 0;
+    running = true; quickFails = 0; resetCadence();
     $('mic').textContent = '■ Stop'; $('mic').classList.add('on');
     keepAwake();
     try { startRec(); } catch (e) { status('Could not start: ' + e.message, true); stop(); }
