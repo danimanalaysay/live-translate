@@ -48,6 +48,7 @@
   .entry .t { color: var(--muted); font-size: 11px; margin-top: 2px; }
   .entry.pending .en { color: var(--muted); font-style: italic; }
   .entry.polishing .t::after { content: " · improving…"; }
+  .entry.same .zh { display: none !important; } /* said in your language: show it once */
   #live { border-left-color: var(--line); opacity: 0.75; margin-top: 6px; }
   #live:empty { display: none; }
   #empty { color: var(--muted); text-align: center; margin-top: 18vh; line-height: 1.6; padding: 0 20px; }
@@ -165,6 +166,11 @@
     <option value="1">Yes: when the speaker finishes, redo the pieces as one smooth translation</option>
     <option value="0">No: keep the quick pieces</option>
   </select>
+  <label for="autoEn">When someone speaks English in a Mandarin meeting</label>
+  <select id="autoEn">
+    <option value="1">Switch to English automatically (may miss the first words)</option>
+    <option value="0">Off: listen for one language only</option>
+  </select>
   <label for="turns">Separate different speakers</label>
   <select id="turns">
     <option value="voice">By voice and long pauses (experimental)</option>
@@ -214,13 +220,14 @@
     src: store.get('src', 'zh-TW'), tgt: store.get('tgt', 'en'), fs: store.get('fs', '20'),
     showZh: store.get('showZh', '1'), liveTr: store.get('liveTr', '1'), theme: store.get('theme', 'dark'),
     chunk: store.get('chunk', 'fast'), turns: store.get('turns', 'voice'), polish: store.get('polish', '1'),
+    autoEn: store.get('autoEn', '1'),
     engine: store.get('engine', 'google'), gkey: store.get('gkey', ''), gmodel: store.get('gmodel', ''),
     okey: store.get('okey', ''), omodel: store.get('omodel', ''), ckey: store.get('ckey', ''), cmodel: store.get('cmodel', ''),
   };
   function applyCfg() {
     $('srcLang').value = cfg.src; $('tgtLang').value = cfg.tgt; $('fs').value = cfg.fs;
     $('fsVal').textContent = cfg.fs + 'px'; $('showZh').value = cfg.showZh;
-    $('liveTr').value = cfg.liveTr; $('theme').value = cfg.theme; $('chunk').value = cfg.chunk; $('turns').value = cfg.turns; $('polish').value = cfg.polish;
+    $('liveTr').value = cfg.liveTr; $('theme').value = cfg.theme; $('chunk').value = cfg.chunk; $('turns').value = cfg.turns; $('polish').value = cfg.polish; $('autoEn').value = cfg.autoEn;
     $('engine').value = cfg.engine;
     const p = PROV[cfg.engine];
     $('aiBox').style.display = p ? '' : 'none';
@@ -246,7 +253,8 @@
   const bind = (id, key, after) => $(id).addEventListener('input', e => {
     cfg[key] = e.target.value; store.set(key, cfg[key]); applyCfg(); after && after();
   });
-  bind('srcLang', 'src', () => { if (running) { restartSoon = true; rec && rec.abort(); } });
+  bind('srcLang', 'src', () => { activeLang = cfg.src; if (running) { restartSoon = true; rec && rec.abort(); } });
+  bind('autoEn', 'autoEn', () => { if (activeLang !== cfg.src) flipLang(cfg.src, true); });
   bind('engine', 'engine');
   $('amodel').addEventListener('input', e => {
     const p = PROV[cfg.engine]; if (!p) return;
@@ -290,20 +298,25 @@
   const cache = new Map();
   // Language the translation goes into. When someone speaks the same language as the target
   // (e.g. English speech while "Translate into" is English), translate into Traditional Chinese instead.
-  function outLang() {
-    const base = s => s.split('-')[0];
-    if (base(cfg.src) === 'en' && base(cfg.tgt) === 'en') return 'zh-TW';
-    if (cfg.src === cfg.tgt) return 'en';
+  const base = s => s.split('-')[0];
+  function outLang(lang = cfg.src) {
+    if (base(lang) === 'en' && base(cfg.tgt) === 'en') return 'zh-TW';
+    if (lang === cfg.tgt) return 'en';
     return cfg.tgt;
   }
-  const isSpaced = () => !/^(zh|yue|ja|ko)/.test(cfg.src); // languages that put spaces between words
-  async function translate(text) {
+  // Speech the page switched to automatically (e.g. English in a Mandarin meeting) that is already
+  // in the language you read: show it as said, no translation needed.
+  const sameAsTarget = lang => lang !== cfg.src && base(lang) === base(cfg.tgt);
+  // the language the recognizer is listening for right now (can differ from cfg.src after an automatic switch)
+  let activeLang = cfg.src;
+  const isSpaced = () => !/^(zh|yue|ja|ko)/.test(activeLang); // languages that put spaces between words
+  async function translate(text, lang = activeLang) {
     text = text.trim();
     if (!text) return '';
-    const tl = outLang();
-    const key = cfg.src + '|' + tl + '|' + text;
+    const tl = outLang(lang);
+    const key = lang + '|' + tl + '|' + text;
     if (cache.has(key)) return cache.get(key);
-    const sl = cfg.src.startsWith('yue') ? 'zh-TW' : cfg.src.startsWith('en') ? 'en' : cfg.src;
+    const sl = lang.startsWith('yue') ? 'zh-TW' : lang.startsWith('en') ? 'en' : lang;
     let out = '';
     try {
       const u = 'https://translate.googleapis.com/translate_a/single?client=gtx&dt=t'
@@ -480,10 +493,10 @@
     }
   };
 
-  function aiTranslate(eng, text, context) {
+  function aiTranslate(eng, text, context, lang = cfg.src) {
     const p = PROV[eng];
-    const tgt = LANG_NAMES[outLang()] || outLang();
-    const sys = 'You are a live interpreter at a work meeting. The input is ' + (SRC_NAMES[cfg.src] || 'Chinese')
+    const tgt = LANG_NAMES[outLang(lang)] || outLang(lang);
+    const sys = 'You are a live interpreter at a work meeting. The input is ' + (SRC_NAMES[lang] || 'Chinese')
       + ' speech captured by automatic speech recognition, so it may have missing punctuation, homophone mistakes, or'
       + ' wrongly recognized names; use the context only to fix such recognition mistakes. Translate ONLY the line'
       + ' marked NEW into clear, plain ' + tgt + '. Be faithful and neutral: keep the speaker\'s meaning, tone and level of'
@@ -532,11 +545,12 @@
   }
 
   // Finished sentences: the chosen AI when set up, Google Translate otherwise or as a fallback.
-  async function translateFinal(zh, context) {
+  async function translateFinal(zh, context, lang = activeLang) {
+    if (sameAsTarget(lang)) return { text: zh, by: 'said in ' + (SRC_NAMES[lang] || lang), same: true };
     const eng = cfg.engine, p = PROV[eng];
     if (p && cfg[p.keyKey] && Date.now() > (pausedUntil[eng] || 0)) {
       try {
-        return { text: await aiTranslate(eng, zh, context), by: p.name };
+        return { text: await aiTranslate(eng, zh, context, lang), by: p.name };
       } catch (e) {
         if (e.status === 429) {
           pausedUntil[eng] = Date.now() + 60000;
@@ -551,7 +565,7 @@
     } else if (p && !cfg[p.keyKey]) {
       status(p.name + ' is selected but has no key saved — using Google Translate. Open ⚙️, paste the key, tap Test key.', true);
     }
-    return { text: await translate(zh), by: 'Google' };
+    return { text: await translate(zh, lang), by: 'Google' };
   }
 
   // ---------- transcript ----------
@@ -568,7 +582,7 @@
   function renderEntry(e) {
     const div = document.createElement('div');
     const turnNo = e.turn || 0, prev = $('entries').lastElementChild;
-    div.className = 'entry' + (e.en ? '' : ' pending') + (turnNo % 2 ? ' alt' : '')
+    div.className = 'entry' + (e.en ? '' : ' pending') + (turnNo % 2 ? ' alt' : '') + (e.same ? ' same' : '')
       + (prev && +prev.dataset.turn !== turnNo ? ' turn-start' : '');
     div.dataset.turn = turnNo;
     div.innerHTML = '<div class="zh"></div><div class="en"></div><div class="t"></div>';
@@ -588,7 +602,8 @@
     if (newTurnPending) closeStatement();
     if (newTurnPending && entries.length) turn++;
     newTurnPending = false;
-    const e = { zh, en: '', turn, mt: meetingId, ts: Date.now(),
+    const lang = activeLang;
+    const e = { zh, en: '', turn, mt: meetingId, ts: Date.now(), lang,
       time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }) };
     const context = entries.slice(-4).map(c => ({ zh: c.zh, en: c.en }));
     entries.push(e);
@@ -596,9 +611,10 @@
     stmt.push({ e, div });
     if (stmt.reduce((n, x) => n + x.e.zh.length, 0) > 200) closeStatement(); // very long monologue: polish what we have
     if (stick) scrollDown(true);
-    const res = await translateFinal(zh, context);
+    const res = await translateFinal(zh, context, lang);
     if (e.merged) return; // already replaced by the whole-statement translation
     e.en = res.text; e.by = res.by;
+    if (res.same) { e.same = true; div.classList.add('same'); }
     div.classList.remove('pending');
     div.querySelector('.en').textContent = e.en;
     setTag(div, e);
@@ -614,22 +630,25 @@
     if (g.length >= 2 && cfg.polish === '1') polishStatement(g);
   }
   async function polishStatement(g) {
-    const sep = /^(zh|yue|ja)/.test(cfg.src) ? '' : ' ';
+    const lang = g[0].e.lang || cfg.src;
+    const sep = /^(zh|yue|ja)/.test(lang) ? '' : ' ';
     const zh = g.map(x => x.e.zh).join(sep);
     const first = entries.indexOf(g[0].e);
     if (first < 0) return;
     const context = entries.slice(Math.max(0, first - 4), first).map(c => ({ zh: c.zh, en: c.en }));
-    g.forEach(x => x.div.classList.add('polishing'));
-    const res = await translateFinal(zh, context);
+    if (!sameAsTarget(lang)) g.forEach(x => x.div.classList.add('polishing'));
+    const res = await translateFinal(zh, context, lang);
     // only merge if the pieces are still there, side by side (not cleared meanwhile)
     const at = entries.indexOf(g[0].e);
     if (at < 0 || g.some((x, i) => entries[at + i] !== x.e)) return;
-    const m = { zh, en: res.text, by: res.by + ' · whole', turn: g[0].e.turn, mt: g[0].e.mt, ts: g[0].e.ts, time: g[0].e.time };
+    const m = { zh, en: res.text, by: res.by + (res.same ? '' : ' · whole'), turn: g[0].e.turn, mt: g[0].e.mt, ts: g[0].e.ts,
+      time: g[0].e.time, lang, same: !!res.same };
     g.forEach(x => { x.e.merged = true; });
     entries.splice(at, g.length, m);
     const stick = nearBottom();
     const div = g[0].div; // reuse the first piece's block so the speaker coloring stays the same
     div.classList.remove('pending', 'polishing');
+    div.classList.toggle('same', m.same);
     div.querySelector('.zh').textContent = zh;
     div.querySelector('.en').textContent = m.en;
     div.querySelector('.t').textContent = m.time;
@@ -656,7 +675,7 @@
         liveTimer = null;
         const seq = ++liveSeq, text = lastLiveText;
         if (!text) return;
-        const en = await translate(text);
+        const en = sameAsTarget(activeLang) ? '' : await translate(text);
         if (seq === liveSeq && $('live').firstChild && lastLiveText) $('live').querySelector('.en').textContent = en;
       }, 600);
     } else if (cfg.liveTr !== '1') {
@@ -819,6 +838,7 @@
     voice.quiet = 0;
     // Someone is clearly talking but speech recognition hears nothing for a long time: the mic is not shared.
     voice.loudNoWords += 50;
+    voice.loudSinceWords = (voice.loudSinceWords || 0) + 50; // for the Mandarin/English switch
     if (voice.loudNoWords > 10000) { voiceBroken(); return; }
     const f = pitch(buf, voice.ctx.sampleRate);
     if (!f) return;
@@ -867,9 +887,49 @@
     if (document.visibilityState === 'visible' && running) keepAwake();
   });
 
+  // ---------- automatic Mandarin ⇄ English switching ----------
+  // The phone's recognizer hears one language at a time. Mandarin is the home language; when someone is
+  // clearly talking but no Mandarin words come out (or the words come out as English), switch to English
+  // for a while, then come back to Mandarin as soon as English stops.
+  const ls = { speechAt: 0, speechEndAt: 0, resultAt: 0, flippedAt: 0 };
+  const autoOn = () => cfg.autoEn === '1' && /^(zh|yue)/.test(cfg.src);
+  function langLabel() {
+    return activeLang === cfg.src ? $('srcLang').selectedOptions[0].text : 'English · switched automatically';
+  }
+  function flipLang(to, force) {
+    if (!running || activeLang === to || (!force && Date.now() - ls.flippedAt < 1500)) return;
+    // what was heard so far belongs to the old language
+    if (lastLiveText) { const t = lastLiveText; clearLive(); addFinal(t); }
+    closeStatement();
+    activeLang = to; ls.flippedAt = Date.now(); ls.speechAt = 0; voice.loudSinceWords = 0;
+    resetCadence();
+    restartSoon = true;
+    try { rec && rec.abort(); } catch {}
+  }
+  const otherLang = () => (activeLang === cfg.src ? 'en-US' : cfg.src);
+  setInterval(() => {
+    if (!running || !autoOn()) return;
+    const now = Date.now();
+    // Someone is talking but no words come out: probably the other language. Mandarin is home, so going
+    // back to it is quicker than leaving it (Mandarin words normally appear within about a second).
+    const wait = activeLang === cfg.src ? 1600 : 1200;
+    const talking = ls.speechAt && ls.speechAt > ls.speechEndAt && ls.speechAt > ls.resultAt;
+    if (talking && now - Math.max(ls.speechAt, ls.flippedAt) > wait) { flipLang(otherLang()); return; }
+    if (voice.ctx && (voice.loudSinceWords || 0) > wait) { flipLang(otherLang()); return; } // same, using the voice listener
+    // English is a short detour: return to Mandarin once English words stop for a few seconds.
+    if (activeLang !== cfg.src && now - Math.max(ls.resultAt, ls.flippedAt) > 5000) flipLang(cfg.src);
+  }, 250);
+  // Mandarin recognizer that writes mostly English letters: the speaker switched to English.
+  function looksEnglish(t) {
+    const latin = (t.match(/[A-Za-z]/g) || []).length, han = (t.match(/\p{Script=Han}/gu) || []).length;
+    return latin >= 10 && latin > han * 3;
+  }
+
   function startRec() {
     rec = new SR();
-    rec.lang = cfg.src;
+    rec.lang = activeLang;
+    rec.onspeechstart = () => { ls.speechAt = Date.now(); };
+    rec.onspeechend = () => { ls.speechEndAt = Date.now(); };
     rec.interimResults = true;
     // Android Chrome's continuous mode repeats text; short sessions + auto-restart work better there.
     rec.continuous = !isAndroid;
@@ -879,16 +939,26 @@
       const nowMs = performance.now();
       if (lastSpeechAt && nowMs - lastSpeechAt > turnGapMs()) markNewTurn();
       lastSpeechAt = nowMs; voice.loudNoWords = 0;
-      let interim = '';
+      let interim = '', heardText = '', lowConfidence = false;
       for (let i = ev.resultIndex; i < ev.results.length; i++) {
         const r = ev.results[i];
         if (i !== seg.idx) { clearTimeout(seg.timer); seg.idx = i; seg.done = 0; }
         const rest = r[0].transcript.slice(seg.done); // skip the part already translated as a chunk
+        heardText += rest;
+        // In English mode, Mandarin speech comes out as low-confidence English guesses: drop those.
+        if (r.isFinal && activeLang !== cfg.src && r[0].confidence > 0 && r[0].confidence < 0.3) {
+          lowConfidence = true; seg.idx = i + 1; seg.done = 0; continue;
+        }
         if (r.isFinal) { clearTimeout(seg.timer); clearLive(); addFinal(rest); closeStatement(); seg.idx = i + 1; seg.done = 0; }
         else interim += rest;
       }
+      if (heardText.trim() && !lowConfidence) { ls.resultAt = Date.now(); voice.loudSinceWords = 0; }
       if (interim) { showLive(interim); maybeChunk(interim); }
       quickFails = 0;
+      if (autoOn()) {
+        if (activeLang === cfg.src && looksEnglish(heardText)) flipLang('en-US');
+        else if (lowConfidence) flipLang(cfg.src);
+      }
     };
     rec.onerror = (ev) => {
       if (ev.error === 'no-speech' || ev.error === 'aborted') return;
@@ -908,7 +978,7 @@
     rec.onstart = () => {
       lastStart = Date.now(); resetSeg();
       if ($('status').classList.contains('err') && Date.now() - errShownAt < 8000) return; // keep a fresh warning visible
-      status('Listening (' + $('srcLang').selectedOptions[0].text + ') · translating with ' + translatorName() + '…');
+      status('Listening (' + langLabel() + ') · ' + (sameAsTarget(activeLang) ? 'shown as said' : 'translating with ' + translatorName()) + '…');
     };
     rec.onend = () => {
       // flush any unfinished interim text as a sentence
@@ -930,6 +1000,7 @@
       return;
     }
     running = true; quickFails = 0; resetCadence(); errShownAt = 0;
+    activeLang = cfg.src; Object.assign(ls, { speechAt: 0, speechEndAt: 0, resultAt: 0, flippedAt: 0 });
     lastSpeechAt = 0; newTurnPending = true; // a new listening session starts a new block
     // A new meeting starts if nothing was said in the last 30 minutes.
     const last = entries[entries.length - 1];
