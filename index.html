@@ -219,6 +219,10 @@
   const $ = (id) => document.getElementById(id);
   const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
   const isAndroid = /Android/i.test(navigator.userAgent);
+  const isIOS = /iPhone|iPad|iPod/i.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+  // On iPhone, only Safari gets words back from speech recognition; Chrome/Edge/Firefox/in-app browsers open the mic but hear nothing.
+  const iosNotSafari = isIOS && /CriOS|FxiOS|EdgiOS|OPiOS|GSA\/|FBAN|FBAV|Instagram|Line\//i.test(navigator.userAgent);
+  const IOS_MSG = 'On iPhone, speech recognition only works in Safari. Tap Share (or ⋯) → "Open in Safari", or copy this link into Safari.';
 
   // ---------- settings (stored on this device only) ----------
   const store = {
@@ -792,7 +796,13 @@
   function maybeChunk(text) {
     const m = CHUNK[cfg.chunk];
     clearTimeout(seg.timer);
-    if (!m || tf()) return;
+    if (tf()) {
+      // Some phones (iPhone Safari) rarely mark text as finished: take it once it stops changing, or when it gets long.
+      if (text.length >= (isSpaced() ? 200 : 80)) { commitChunk(text.slice(0, cutPoint(text, isSpaced() ? 200 : 80))); return; }
+      seg.timer = setTimeout(() => { if (lastLiveText === text) commitChunk(text); }, 1200);
+      return;
+    }
+    if (!m) return;
     noteUpdate(text.length);
     if ($('settings').open) showCadence();
     const maxLen = maxChars(m);
@@ -972,7 +982,9 @@
     const ok = b => b ? '✅' : '⬜';
     let hint = '';
     const secs = (Date.now() - dg.startedAt) / 1000;
-    if (dg.err === 'not-allowed' || dg.err === 'service-not-allowed') hint = 'Microphone permission is blocked for this page.';
+    if (iosNotSafari) hint = IOS_MSG;
+    else if (isIOS && dg.err === 'service-not-allowed') hint = 'Turn on Dictation: iPhone Settings → General → Keyboard → Enable Dictation (and Siri in Settings → Siri). Then reload this page.';
+    else if (dg.err === 'not-allowed' || dg.err === 'service-not-allowed') hint = 'Microphone permission is blocked for this page.';
     else if (dg.err === 'network') hint = 'The phone cannot reach Google\'s speech service: check internet / Wi-Fi.';
     else if (dg.err === 'audio-capture') hint = 'No microphone available: another app (voice recorder, call, Zoom, LINE) may be using it. Close it and tap Start again.';
     else if (secs > 8 && !dg.audio) hint = 'The microphone never opened. Close other apps that use the mic, then tap Stop and Start.';
@@ -1200,7 +1212,8 @@
   try { (JSON.parse(localStorage.getItem('lt_log') || '[]')).forEach(e => { entries.push(e); renderEntry(e); }); } catch {}
   turn = entries.length ? (entries[entries.length - 1].turn || 0) : 0;
   scrollDown(true);
-  if (!SR) status('Speech recognition not available in this browser. Use Chrome, Edge, or Safari.', true);
+  if (iosNotSafari) status(IOS_MSG, true);
+  else if (!SR) status('Speech recognition not available in this browser. Use Chrome, Edge, or Safari.', true);
   else if (!window.isSecureContext) status('Mic needs HTTPS (or localhost). Open this page over https://', true);
 })();
 </script>
