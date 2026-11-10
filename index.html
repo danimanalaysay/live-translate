@@ -47,6 +47,7 @@
   .entry .en { font-size: var(--fs); line-height: 1.4; margin-top: 4px; font-weight: 500; }
   .entry .t { color: var(--muted); font-size: 11px; margin-top: 2px; }
   .entry.pending .en { color: var(--muted); font-style: italic; }
+  .entry.polishing .t::after { content: " · improving…"; }
   #live { border-left-color: var(--line); opacity: 0.75; margin-top: 6px; }
   #live:empty { display: none; }
   #empty { color: var(--muted); text-align: center; margin-top: 18vh; line-height: 1.6; padding: 0 20px; }
@@ -75,6 +76,13 @@
     width: 100%; font: inherit; font-size: 14px; color: var(--text); background: var(--bg);
     border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px;
   }
+  dialog input[type=email], dialog textarea {
+    width: 100%; font: inherit; font-size: 14px; color: var(--text); background: var(--bg);
+    border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px;
+  }
+  dialog textarea { min-height: 40vh; resize: vertical; line-height: 1.45; }
+  dialog .row.wrap { flex-wrap: wrap; justify-content: flex-start; }
+  dialog label.check { display: flex; gap: 8px; align-items: center; color: var(--text); }
   dialog { max-height: 90vh; overflow-y: auto; }
   .tag { font-size: 10px; border: 1px solid var(--line); border-radius: 4px; padding: 0 4px; margin-left: 6px; }
 </style>
@@ -103,6 +111,7 @@
 
 <footer>
   <button id="mic">▶ Start</button>
+  <button id="sumBtn" class="small" title="Meeting summary / email">📝</button>
   <button id="copyBtn" class="small" title="Copy transcript">📋</button>
   <button id="clearBtn" class="small" title="Clear">🗑️</button>
 </footer>
@@ -150,6 +159,11 @@
     <option value="full">Off: wait for full sentences (best accuracy)</option>
   </select>
   <div id="cadInfo" style="font-size:12px;color:var(--muted);margin-top:4px">Learns each speaker's rhythm: a pause means a gap clearly longer than how they normally talk.</div>
+  <label for="polish">Re-translate whole statements</label>
+  <select id="polish">
+    <option value="1">Yes: when the speaker finishes, redo the pieces as one smooth translation</option>
+    <option value="0">No: keep the quick pieces</option>
+  </select>
   <label for="turns">Separate different speakers</label>
   <select id="turns">
     <option value="voice">By voice and long pauses (experimental)</option>
@@ -160,6 +174,28 @@
   <label for="theme">Theme</label>
   <select id="theme"><option value="dark">Dark</option><option value="light">Light</option></select>
   <div class="row"><button id="closeSettings">Done</button></div>
+</dialog>
+
+<dialog id="sumDlg">
+  <h3 style="margin:0">Meeting summary</h3>
+  <label for="sumRange">Summarize</label>
+  <select id="sumRange"></select>
+  <div class="row wrap">
+    <button id="sumMake">✨ Make summary</button>
+    <span id="sumMsg" style="font-size:13px;color:var(--muted);align-self:center"></span>
+  </div>
+  <label for="sumText">Summary (you can edit it before sending)</label>
+  <textarea id="sumText" placeholder="Tap “Make summary”."></textarea>
+  <label class="check"><input type="checkbox" id="sumInclude"> Add the full transcript below the summary</label>
+  <label for="sumTo">Email to (optional, saved on this device)</label>
+  <input type="email" id="sumTo" multiple placeholder="name@company.com, other@company.com">
+  <div class="row wrap">
+    <button id="sumEmail">✉️ Email</button>
+    <button id="sumShare">📤 Share…</button>
+    <button id="sumCopy">📋 Copy</button>
+    <button id="sumClose" style="margin-left:auto">Close</button>
+  </div>
+  <p style="font-size:12px;color:var(--muted);margin:10px 0 0">Email opens your phone's mail app with the summary filled in; nothing is sent until you press Send there. Share lets you pick Gmail, Outlook, LINE, etc.</p>
 </dialog>
 
 <script>
@@ -176,14 +212,14 @@
   const cfg = {
     src: store.get('src', 'zh-TW'), tgt: store.get('tgt', 'en'), fs: store.get('fs', '20'),
     showZh: store.get('showZh', '1'), liveTr: store.get('liveTr', '1'), theme: store.get('theme', 'dark'),
-    chunk: store.get('chunk', 'fast'), turns: store.get('turns', 'voice'),
+    chunk: store.get('chunk', 'fast'), turns: store.get('turns', 'voice'), polish: store.get('polish', '1'),
     engine: store.get('engine', 'google'), gkey: store.get('gkey', ''), gmodel: store.get('gmodel', ''),
     okey: store.get('okey', ''), omodel: store.get('omodel', ''), ckey: store.get('ckey', ''), cmodel: store.get('cmodel', ''),
   };
   function applyCfg() {
     $('srcLang').value = cfg.src; $('tgtLang').value = cfg.tgt; $('fs').value = cfg.fs;
     $('fsVal').textContent = cfg.fs + 'px'; $('showZh').value = cfg.showZh;
-    $('liveTr').value = cfg.liveTr; $('theme').value = cfg.theme; $('chunk').value = cfg.chunk; $('turns').value = cfg.turns;
+    $('liveTr').value = cfg.liveTr; $('theme').value = cfg.theme; $('chunk').value = cfg.chunk; $('turns').value = cfg.turns; $('polish').value = cfg.polish;
     $('engine').value = cfg.engine;
     const p = PROV[cfg.engine];
     $('aiBox').style.display = p ? '' : 'none';
@@ -221,6 +257,7 @@
     cfg[p.keyKey] = e.target.value.trim(); store.set(p.keyKey, cfg[p.keyKey]);
   });
   bind('tgtLang', 'tgt'); bind('fs', 'fs'); bind('showZh', 'showZh'); bind('liveTr', 'liveTr'); bind('theme', 'theme'); bind('chunk', 'chunk', () => showCadence());
+  bind('polish', 'polish');
   bind('turns', 'turns', () => {
     if (cfg.turns === 'voice') store.set('voiceBroken', ''); // let it try the voice listener again
     stopVoice(); if (running) startVoice();
@@ -340,12 +377,12 @@
       .sort((a, b) => rankClaude(b) - rankClaude(a));
   }
 
-  async function openaiCall(key, model, sys, prompt) {
+  async function openaiCall(key, model, sys, prompt, maxTokens = 1024) {
     const reasoning = /^(gpt-5|o\d)/.test(model);
     // Reasoning models: turn reasoning down for speed. Older ones only accept 'minimal', newer ones 'none'.
     const efforts = reasoning ? [...new Set([store.get('oeff_' + model, 'none'), 'none', 'minimal', 'low', ''])] : [''];
     for (let i = 0; i < efforts.length; i++) {
-      const body = { model, messages: [{ role: 'system', content: sys }, { role: 'user', content: prompt }], max_completion_tokens: 1024 };
+      const body = { model, messages: [{ role: 'system', content: sys }, { role: 'user', content: prompt }], max_completion_tokens: maxTokens };
       if (efforts[i]) body.reasoning_effort = efforts[i];
       if (!reasoning) body.temperature = 0.2;
       const r = await fetch('https://api.openai.com/v1/chat/completions', {
@@ -363,8 +400,8 @@
       return out.trim();
     }
   }
-  async function claudeCall(key, model, sys, prompt) {
-    const body = { model, max_tokens: 1024, system: sys, messages: [{ role: 'user', content: prompt }], temperature: 0.2 };
+  async function claudeCall(key, model, sys, prompt, maxTokens = 1024) {
+    const body = { model, max_tokens: maxTokens, system: sys, messages: [{ role: 'user', content: prompt }], temperature: 0.2 };
     const call = () => fetch(CLAUDE_API + 'messages', { method: 'POST', headers: claudeHeaders(key), body: JSON.stringify(body) });
     let r = await call();
     if (r.status === 400) { // some models reject settings like temperature: try once without
@@ -432,11 +469,11 @@
     return p.call(cfg[p.keyKey], cfg[p.modelKey] || p.def, sys, prompt);
   }
 
-  async function geminiCall(key, model, sys, prompt) {
+  async function geminiCall(key, model, sys, prompt, maxTokens = 1024) {
     const body = {
       systemInstruction: { parts: [{ text: sys }] },
       contents: [{ role: 'user', parts: [{ text: prompt }] }],
-      generationConfig: { temperature: 0.2, maxOutputTokens: 1024 },
+      generationConfig: { temperature: 0.2, maxOutputTokens: maxTokens },
     };
     // Turn off "thinking" for speed where the model supports it; drop the setting if the model rejects it.
     if (!noThinkingCfg) body.generationConfig.thinkingConfig = { thinkingBudget: 0 };
@@ -486,7 +523,7 @@
 
   // ---------- transcript ----------
   const entries = [];
-  function saveLog() { try { localStorage.setItem('lt_log', JSON.stringify(entries.slice(-300))); } catch {} }
+  function saveLog() { try { localStorage.setItem('lt_log', JSON.stringify(entries.slice(-2000))); } catch {} }
   function nearBottom() { const l = $('log'); return l.scrollHeight - l.scrollTop - l.clientHeight < 120; }
   function scrollDown(force) { const l = $('log'); if (force || nearBottom()) l.scrollTop = l.scrollHeight; }
 
@@ -515,18 +552,56 @@
     zh = zh.trim();
     if (!/[\p{L}\p{N}]/u.test(zh)) return; // skip empty or punctuation-only pieces
     const stick = nearBottom();
+    if (newTurnPending) closeStatement();
     if (newTurnPending && entries.length) turn++;
     newTurnPending = false;
-    const e = { zh, en: '', turn, time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }) };
+    const e = { zh, en: '', turn, mt: meetingId, ts: Date.now(),
+      time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }) };
     const context = entries.slice(-4).map(c => ({ zh: c.zh, en: c.en }));
     entries.push(e);
     const div = renderEntry(e);
+    stmt.push({ e, div });
+    if (stmt.reduce((n, x) => n + x.e.zh.length, 0) > 200) closeStatement(); // very long monologue: polish what we have
     if (stick) scrollDown(true);
     const res = await translateFinal(zh, context);
+    if (e.merged) return; // already replaced by the whole-statement translation
     e.en = res.text; e.by = res.by;
     div.classList.remove('pending');
     div.querySelector('.en').textContent = e.en;
     setTag(div, e);
+    saveLog();
+    if (stick) scrollDown(true);
+  }
+
+  // ---------- whole statements: when the speaker finishes, re-translate the quick pieces together ----------
+  let stmt = []; // pieces of the statement being spoken: [{ e, div }]
+  let meetingId = 0;
+  function closeStatement() {
+    const g = stmt; stmt = [];
+    if (g.length >= 2 && cfg.polish === '1') polishStatement(g);
+  }
+  async function polishStatement(g) {
+    const sep = /^(zh|yue|ja)/.test(cfg.src) ? '' : ' ';
+    const zh = g.map(x => x.e.zh).join(sep);
+    const first = entries.indexOf(g[0].e);
+    if (first < 0) return;
+    const context = entries.slice(Math.max(0, first - 4), first).map(c => ({ zh: c.zh, en: c.en }));
+    g.forEach(x => x.div.classList.add('polishing'));
+    const res = await translateFinal(zh, context);
+    // only merge if the pieces are still there, side by side (not cleared meanwhile)
+    const at = entries.indexOf(g[0].e);
+    if (at < 0 || g.some((x, i) => entries[at + i] !== x.e)) return;
+    const m = { zh, en: res.text, by: res.by + ' · whole', turn: g[0].e.turn, mt: g[0].e.mt, ts: g[0].e.ts, time: g[0].e.time };
+    g.forEach(x => { x.e.merged = true; });
+    entries.splice(at, g.length, m);
+    const stick = nearBottom();
+    const div = g[0].div; // reuse the first piece's block so the speaker coloring stays the same
+    div.classList.remove('pending', 'polishing');
+    div.querySelector('.zh').textContent = zh;
+    div.querySelector('.en').textContent = m.en;
+    div.querySelector('.t').textContent = m.time;
+    setTag(div, m);
+    g.slice(1).forEach(x => x.div.remove());
     saveLog();
     if (stick) scrollDown(true);
   }
@@ -652,6 +727,7 @@
       commitChunk(old);
       if (rest) showLive(rest);
     }
+    closeStatement();
     newTurnPending = true;
   }
   // A silence much longer than this speaker's normal pause usually means someone else talks next.
@@ -772,7 +848,7 @@
         const r = ev.results[i];
         if (i !== seg.idx) { clearTimeout(seg.timer); seg.idx = i; seg.done = 0; }
         const rest = r[0].transcript.slice(seg.done); // skip the part already translated as a chunk
-        if (r.isFinal) { clearTimeout(seg.timer); clearLive(); addFinal(rest); seg.idx = i + 1; seg.done = 0; }
+        if (r.isFinal) { clearTimeout(seg.timer); clearLive(); addFinal(rest); closeStatement(); seg.idx = i + 1; seg.done = 0; }
         else interim += rest;
       }
       if (interim) { showLive(interim); maybeChunk(interim); }
@@ -797,6 +873,7 @@
     rec.onend = () => {
       // flush any unfinished interim text as a sentence
       if (lastLiveText) { const t = lastLiveText; clearLive(); addFinal(t); }
+      closeStatement();
       if (running) {
         if (Date.now() - lastStart < 1000) quickFails++;
         if (quickFails > 8) { status('Speech recognition keeps stopping. Tap Start to try again.', true); stop(); return; }
@@ -814,6 +891,9 @@
     }
     running = true; quickFails = 0; resetCadence();
     lastSpeechAt = 0; newTurnPending = true; // a new listening session starts a new block
+    // A new meeting starts if nothing was said in the last 30 minutes.
+    const last = entries[entries.length - 1];
+    meetingId = last && last.mt && Date.now() - (last.ts || 0) < 30 * 60000 ? last.mt : Date.now();
     $('mic').textContent = '■ Stop'; $('mic').classList.add('on');
     keepAwake();
     try { startRec(); } catch (e) { status('Could not start: ' + e.message, true); stop(); return; }
@@ -849,6 +929,92 @@
     entries.length = 0; $('entries').innerHTML = ''; clearLive(); saveLog();
     $('empty').style.display = ''; delete $('clearBtn').dataset.armed; $('clearBtn').textContent = '🗑️';
     status('Cleared.');
+  };
+
+  // ---------- meeting summary (to email or share) ----------
+  const lastMeetingId = () => entries.length ? (entries[entries.length - 1].mt || 0) : 0;
+  function pickEntries() {
+    const mt = lastMeetingId();
+    return $('sumRange').value === 'last' ? entries.filter(e => (e.mt || 0) === mt) : entries.slice();
+  }
+  function transcriptText(list, marker) {
+    return list.map((e, i) => (i && (e.turn || 0) !== (list[i - 1].turn || 0) ? marker + '\n' : '')
+      + '[' + e.time + '] ' + e.zh + '\n' + e.en).join('\n');
+  }
+  $('sumBtn').onclick = () => {
+    const sel = $('sumRange'); sel.innerHTML = '';
+    const mt = lastMeetingId(), cur = entries.filter(e => (e.mt || 0) === mt);
+    if (cur.length && cur.length < entries.length) sel.add(new Option('Latest meeting (from ' + cur[0].time + ', ' + cur.length + ' lines)', 'last'));
+    sel.add(new Option('Whole transcript' + (entries.length ? ' (from ' + entries[0].time + ', ' + entries.length + ' lines)' : ' (empty)'), 'all'));
+    $('sumTo').value = store.get('sumTo', '');
+    if (!$('sumText').value) $('sumText').value = store.get('sumLast', '');
+    const p = PROV[cfg.engine];
+    $('sumMsg').textContent = p && cfg[p.keyKey] ? 'Uses ' + p.name + '.' : 'Needs Gemini, ChatGPT or Claude: set one up in ⚙️ first.';
+    $('sumDlg').showModal();
+  };
+  $('sumClose').onclick = () => $('sumDlg').close();
+  $('sumTo').addEventListener('change', e => store.set('sumTo', e.target.value.trim()));
+  $('sumText').addEventListener('input', e => store.set('sumLast', e.target.value));
+
+  $('sumMake').onclick = async () => {
+    const p = PROV[cfg.engine];
+    if (!p || !cfg[p.keyKey]) { $('sumMsg').textContent = 'Set up Gemini, ChatGPT or Claude in ⚙️ first (Google Translate cannot write summaries).'; return; }
+    const list = pickEntries();
+    if (!list.length) { $('sumMsg').textContent = 'Nothing to summarize yet.'; return; }
+    const tgt = LANG_NAMES[cfg.tgt] || cfg.tgt;
+    const sys = 'You write meeting summaries. The transcript is from a meeting, captured by automatic speech recognition in '
+      + (SRC_NAMES[cfg.src] || 'Chinese') + ' with quick machine translations into ' + tgt + '. Both may contain mistakes:'
+      + ' where they disagree, trust the original Chinese and the context. A line "(another speaker)" marks where the voice'
+      + ' probably changed; speakers are not named, so only name people if the transcript itself says their names.'
+      + ' Write the summary in ' + tgt + ', ready to paste into an email, in plain text (no markdown: no **, no #).'
+      + ' Use exactly this layout:\nSubject: <short subject line>\n\nSummary:\n<2-4 sentences>\n\nKey points:\n- ...\n\n'
+      + 'Decisions:\n- ... (or "- None recorded")\n\nAction items:\n- <task> (owner: <name if said>, due: <date if said>)\n\n'
+      + 'Open questions:\n- ... (or "- None")\n\nBe concise. Do not invent facts, names, numbers or dates that are not in the transcript.';
+    let text = transcriptText(list, '(another speaker)');
+    if (text.length > 120000) text = '(earlier part omitted)\n' + text.slice(-120000); // keep within model limits
+    const prompt = 'Meeting date: ' + new Date(list[0].ts || Date.now()).toLocaleDateString() + '\n\nTranscript:\n' + text;
+    $('sumMsg').textContent = 'Writing the summary with ' + p.name + '…';
+    $('sumMake').disabled = true;
+    try {
+      const out = await p.call(cfg[p.keyKey], cfg[p.modelKey] || p.def, sys, prompt, 2048);
+      $('sumText').value = out.replace(/\*\*/g, '').replace(/^#+\s*/gm, '').trim();
+      store.set('sumLast', $('sumText').value);
+      $('sumMsg').textContent = '✅ Done. Check it, then Email or Share.';
+    } catch (e) {
+      $('sumMsg').textContent = '❌ ' + e.message;
+    } finally {
+      $('sumMake').disabled = false;
+    }
+  };
+  function emailParts() {
+    let body = $('sumText').value.trim(), subject = 'Meeting summary';
+    const m = body.match(/^Subject:\s*(.+)\n+/i);
+    if (m) { subject = m[1].trim(); body = body.slice(m[0].length); }
+    if ($('sumInclude').checked && body) body += '\n\n----- Full transcript -----\n' + transcriptText(pickEntries(), '———');
+    return { subject, body };
+  }
+  $('sumEmail').onclick = async () => {
+    const { subject, body } = emailParts();
+    if (!body) { $('sumMsg').textContent = 'Make a summary first.'; return; }
+    const to = $('sumTo').value.trim().split(/[,;\s]+/).filter(Boolean).map(encodeURIComponent).join(',');
+    store.set('sumTo', $('sumTo').value.trim());
+    try { await navigator.clipboard.writeText(body); } catch {}
+    const a = document.createElement('a');
+    a.href = 'mailto:' + to + '?subject=' + encodeURIComponent(subject) + '&body=' + encodeURIComponent(body);
+    a.click();
+    $('sumMsg').textContent = 'Opening your mail app… The text is also copied, so you can paste it if the email looks cut off.';
+  };
+  $('sumShare').onclick = async () => {
+    const { subject, body } = emailParts();
+    if (!body) { $('sumMsg').textContent = 'Make a summary first.'; return; }
+    if (!navigator.share) { $('sumMsg').textContent = 'Sharing is not supported in this browser: use Email or Copy.'; return; }
+    try { await navigator.share({ title: subject, text: body }); } catch {}
+  };
+  $('sumCopy').onclick = async () => {
+    const { subject, body } = emailParts();
+    if (!body) { $('sumMsg').textContent = 'Make a summary first.'; return; }
+    try { await navigator.clipboard.writeText('Subject: ' + subject + '\n\n' + body); $('sumMsg').textContent = 'Copied.'; }
+    catch { $('sumMsg').textContent = 'Copy not allowed by this browser.'; }
   };
 
   // ---------- init ----------
