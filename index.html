@@ -547,14 +547,21 @@
   function aiTranslate(eng, text, context, lang = cfg.src) {
     const p = PROV[eng];
     const tgt = LANG_NAMES[outLang(lang)] || outLang(lang);
-    const sys = 'You are a live interpreter at a work meeting or class. The input is ' + (SRC_NAMES[lang] || 'Chinese')
-      + ' speech captured by automatic speech recognition, so it may have missing punctuation, homophone mistakes, or'
-      + ' wrongly recognized names; use the context only to fix such recognition mistakes. Translate ONLY the line'
-      + ' marked NEW into clear, plain ' + tgt + '. Be faithful and neutral: keep the speaker\'s meaning, tone and level of'
-      + ' formality exactly. Do NOT add emotion, emphasis, drama, opinions, or details that were not said; do not exaggerate'
-      + ' or soften; prefer simple everyday wording over vivid or literary words. If a piece is incomplete, translate just'
-      + ' what is there without finishing the thought. Keep names, numbers and any words the speaker said in ' + tgt + '.'
-      + ' Reply with the translation only: no quotes, notes, or alternatives.';
+    const sys = 'You are an experienced human interpreter at a work meeting or class, rendering ' + (SRC_NAMES[lang] || 'Chinese')
+      + ' speech into ' + tgt + ' for a listener. The input comes from automatic speech recognition, so it may have missing'
+      + ' punctuation, homophone mistakes, or wrongly recognized names: use the context to work out what was really said.\n'
+      + 'Translate ONLY the line marked NEW, so that it sounds like something a fluent ' + tgt + ' speaker would naturally say'
+      + ' in the same situation:\n'
+      + '- Translate the meaning, not word by word. Reorder clauses, merge or split sentences, and use natural idioms and'
+      + ' phrasing; render Chinese set phrases and idioms by what they mean, not literally.\n'
+      + '- Leave out spoken filler and false starts (那個, 就是, 然後, 對, 嗯, 啊, 這個, repeated words) unless they carry meaning.\n'
+      + '- Make it follow on smoothly from the earlier lines, using pronouns and linking words where a natural speaker would.\n'
+      + '- Use the usual ' + tgt + ' term for technical, academic or business concepts.\n'
+      + '- Keep the speaker\'s meaning, tone and formality: conversational speech stays conversational. Do NOT add emotion,'
+      + ' drama, emphasis, opinions or facts that were not said, and do not exaggerate or soften.\n'
+      + '- If the piece is unfinished, translate what is there without completing the thought.\n'
+      + '- Keep names and numbers exact.\n'
+      + 'Reply with the translation only: no quotes, notes, or alternatives.';
     let prompt = '';
     if (context.length) {
       prompt += 'Earlier in the conversation (for context only, do not translate):\n'
@@ -656,7 +663,7 @@
     newTurnPending = false;
     const e = { zh, en: '', turn, mt: meetingId, ts: Date.now(), lang,
       time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }) };
-    const context = entries.slice(-4).map(c => ({ zh: c.zh, en: c.en }));
+    const context = entries.slice(-6).map(c => ({ zh: c.zh, en: c.en }));
     entries.push(e);
     const div = renderEntry(e);
     stmt.push({ e, div });
@@ -702,7 +709,7 @@
     const zh = g.map((x, i) => x.e.zh + (x.e.awaiting && i < g.length - 1 && !/[，。？！,.?!]$/.test(x.e.zh) ? (sep ? '.' : '。') : '')).join(sep);
     const first = entries.indexOf(g[0].e);
     if (first < 0) return;
-    const context = entries.slice(Math.max(0, first - 4), first).map(c => ({ zh: c.zh, en: c.en }));
+    const context = entries.slice(Math.max(0, first - 6), first).map(c => ({ zh: c.zh, en: c.en }));
     if (!sameAsTarget(lang)) g.forEach(x => x.div.classList.add('polishing'));
     const res = await translateFinal(zh, context, lang);
     // only merge if the pieces are still there, side by side (not cleared meanwhile)
