@@ -171,7 +171,7 @@
   <select id="showZh"><option value="1">Yes</option><option value="0">No (English only)</option></select>
   <label for="flow">How to work</label>
   <select id="flow">
-    <option value="transcribe">Transcribe first, then translate each paragraph (most reliable: lectures, seminars)</option>
+    <option value="transcribe">Transcribe first, then translate each sentence (most reliable: lectures, seminars)</option>
     <option value="live">Translate live, piece by piece (faster, more mistakes)</option>
   </select>
   <div id="flowInfo" style="font-size:12px;color:var(--muted);margin-top:4px"></div>
@@ -267,7 +267,7 @@
     if (gq.gainNode) gq.gainNode.gain.value = +cfg.gain;
     $('liveOnly').style.display = tf() ? 'none' : '';
     $('flowInfo').textContent = tf()
-      ? 'The original words appear first, as they are heard. When the speaker pauses (or after about 20 seconds of non-stop talking), the whole paragraph is translated at once, with the paragraphs before it as context. Listens for one language only.'
+      ? 'The original words appear first, as they are heard. Each finished sentence is then translated, with the sentences before it as context; very short bits wait a moment and are translated together with the next sentence.'
       : 'Short pieces are translated while the speaker is still talking.';
     $('engine').value = cfg.engine;
     const p = PROV[cfg.engine];
@@ -663,10 +663,11 @@
     if (tf()) {
       // transcribe first: the translation comes when the paragraph ends (pause, long talk, new speaker, stop)
       div.querySelector('.en').textContent = '…'; e.awaiting = true;
-      const n = stmt.reduce((k, x) => k + x.e.zh.length, 0);
+      // A full sentence is translated right away; a short bit ("對", "所以呢") waits briefly to go with the next one.
+      const n = stmt.reduce((k, x) => k + x.e.zh.length, 0), spaced = /^en/.test(lang);
       clearTimeout(paraTimer);
-      if (n >= (isSpaced() ? 220 : 90)) closeStatement();
-      else paraTimer = setTimeout(closeStatement, useGroq() ? 4000 : PARA_PAUSE); // Groq text comes in clips a few seconds apart
+      if (n >= (spaced ? 40 : 14)) closeStatement();
+      else paraTimer = setTimeout(closeStatement, useGroq() ? 2500 : PARA_PAUSE);
       if (stick) scrollDown(true);
       return;
     }
@@ -707,7 +708,7 @@
     // only merge if the pieces are still there, side by side (not cleared meanwhile)
     const at = entries.indexOf(g[0].e);
     if (at < 0 || g.some((x, i) => entries[at + i] !== x.e)) return;
-    const m = { zh, en: res.text, by: res.by + (res.same || g.length < 2 ? '' : tf() ? ' · paragraph' : ' · whole'), turn: g[0].e.turn, mt: g[0].e.mt, ts: g[0].e.ts,
+    const m = { zh, en: res.text, by: res.by + (res.same || g.length < 2 ? '' : tf() ? ' · together' : ' · whole'), turn: g[0].e.turn, mt: g[0].e.mt, ts: g[0].e.ts,
       time: g[0].e.time, lang, same: !!res.same };
     g.forEach(x => { x.e.merged = true; });
     entries.splice(at, g.length, m);
@@ -823,7 +824,7 @@
     clearTimeout(seg.timer);
     if (tf()) {
       // Some phones (iPhone Safari) rarely mark text as finished: take it once it stops changing, or when it gets long.
-      if (text.length >= (isSpaced() ? 200 : 80)) { commitChunk(text.slice(0, cutPoint(text, isSpaced() ? 200 : 80))); return; }
+      if (text.length >= (isSpaced() ? 120 : 45)) { commitChunk(text.slice(0, cutPoint(text, isSpaced() ? 120 : 45))); return; }
       seg.timer = setTimeout(() => { if (lastLiveText === text) commitChunk(text); }, 1200);
       return;
     }
@@ -1090,7 +1091,7 @@
       lastStart = Date.now(); resetSeg();
       if ($('status').classList.contains('err') && Date.now() - errShownAt < 8000) return; // keep a fresh warning visible
       status('Listening (' + langLabel() + ') · ' + (sameAsTarget(activeLang) ? 'shown as said'
-        : (tf() ? 'transcribing, then translating each paragraph with ' : 'translating with ') + translatorName()) + '…');
+        : (tf() ? 'transcribing, then translating each sentence with ' : 'translating with ') + translatorName()) + '…');
     };
     rec.onend = () => {
       // flush any unfinished interim text as a sentence
@@ -1152,6 +1153,18 @@
     if (!r.ok) { const e = new Error((j.error && j.error.message) || ('HTTP ' + r.status)); e.status = r.status; throw e; }
     return cleanWhisper(j.text);
   }
+  // Split at sentence ends (。？！.?!); very short pieces stay with the sentence before them.
+  function splitSentences(t) {
+    const parts = t.split(/(?<=[。？！?!]|\.(?=\s|$))/); // "3.5" is not a sentence end
+    const out = [];
+    for (const p of parts) {
+      const s = p.trim(); if (!s) continue;
+      const han = x => /\p{Script=Han}/u.test(x); // never join Chinese and English pieces
+      if (out.length && han(s) === han(out[out.length - 1]) && (s.replace(/[\p{P}\s]/gu, '').length < 6 || out[out.length - 1].replace(/[\p{P}\s]/gu, '').length < 6)) out[out.length - 1] += (/^[A-Za-z]/.test(s) ? ' ' : '') + s;
+      else out.push(s);
+    }
+    return out;
+  }
   function sendClip(blob) {
     if (blob.size < 1500) return;
     gq.sent++;
@@ -1162,7 +1175,8 @@
       dg.results++; dg.err = '';
       gq.tail = (gq.tail + text).slice(-80);
       clearTimeout(paraTimer);
-      addFinal(text, looksEnglish(text) ? 'en-US' : undefined);
+      // one clip can hold several sentences: show and translate them one by one
+      splitSentences(text).forEach((s, i) => { if (i) closeStatement(); addFinal(s, looksEnglish(s) ? 'en-US' : undefined); });
     }).catch(e => {
       dg.err = e.status === 401 ? 'Groq key not accepted' : e.status === 429 ? 'Groq free limit reached' : e.message;
       status(e.status === 401 ? 'Groq key not accepted. Open ⚙️ and paste it again.'
@@ -1259,7 +1273,7 @@
     $('mic').textContent = '■ Stop'; $('mic').classList.add('on');
     keepAwake();
     if (g) {
-      status('Listening with Groq Whisper (boost ' + cfg.gain + '×) · ' + (tf() ? 'transcribing, then translating each paragraph with ' : 'translating with ') + translatorName() + '…');
+      status('Listening with Groq Whisper (boost ' + cfg.gain + '×) · ' + (tf() ? 'transcribing, then translating each sentence with ' : 'translating with ') + translatorName() + '…');
       startGroq();
       return;
     }
