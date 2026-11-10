@@ -119,17 +119,19 @@
   <select id="engine">
     <option value="google">Google Translate (free, basic)</option>
     <option value="gemini">Gemini AI (free key, much better)</option>
+    <option value="openai">ChatGPT (OpenAI API key, paid)</option>
+    <option value="claude">Claude (Anthropic API key, paid)</option>
   </select>
-  <div id="geminiBox">
-    <label for="gkey">Gemini API key <a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener" style="color:var(--accent)">get a free key</a></label>
-    <input type="password" id="gkey" autocomplete="off" spellcheck="false" placeholder="Paste key here (saved on this device only)">
-    <label for="gmodel">Gemini model</label>
-    <select id="gmodel"><option value="">(enter key, then tap Test)</option></select>
+  <div id="aiBox">
+    <label for="akey"><span id="akeyName">API key</span> <a id="akeyLink" href="#" target="_blank" rel="noopener" style="color:var(--accent)">get a key</a></label>
+    <input type="password" id="akey" autocomplete="off" spellcheck="false" placeholder="Paste key here (saved on this device only)">
+    <label for="amodel" id="amodelName">Model</label>
+    <select id="amodel"><option value="">(enter key, then tap Test)</option></select>
     <div class="row" style="justify-content:flex-start;margin-top:8px">
       <button id="testKey">Test key</button>
       <span id="keyMsg" style="font-size:13px;color:var(--muted);align-self:center"></span>
     </div>
-    <p style="font-size:12px;color:var(--muted);margin:8px 0 0">Note: on Gemini's free tier Google may use what you send to improve its products. Avoid it for confidential meetings. If Gemini fails or hits its limit, the page uses Google Translate.</p>
+    <p id="aiNote" style="font-size:12px;color:var(--muted);margin:8px 0 0"></p>
   </div>
   <label for="fs">Text size: <span id="fsVal"></span></label>
   <input type="range" id="fs" min="14" max="40" step="1">
@@ -164,17 +166,30 @@
     showZh: store.get('showZh', '1'), liveTr: store.get('liveTr', '1'), theme: store.get('theme', 'dark'),
     chunk: store.get('chunk', 'fast'),
     engine: store.get('engine', 'google'), gkey: store.get('gkey', ''), gmodel: store.get('gmodel', ''),
+    okey: store.get('okey', ''), omodel: store.get('omodel', ''), ckey: store.get('ckey', ''), cmodel: store.get('cmodel', ''),
   };
   function applyCfg() {
     $('srcLang').value = cfg.src; $('tgtLang').value = cfg.tgt; $('fs').value = cfg.fs;
     $('fsVal').textContent = cfg.fs + 'px'; $('showZh').value = cfg.showZh;
     $('liveTr').value = cfg.liveTr; $('theme').value = cfg.theme; $('chunk').value = cfg.chunk;
-    $('engine').value = cfg.engine; $('gkey').value = cfg.gkey;
-    $('geminiBox').style.display = cfg.engine === 'gemini' ? '' : 'none';
-    if (cfg.gmodel && ![...$('gmodel').options].some(o => o.value === cfg.gmodel)) {
-      $('gmodel').innerHTML = ''; $('gmodel').add(new Option(cfg.gmodel.replace(/^models\//, ''), cfg.gmodel));
+    $('engine').value = cfg.engine;
+    const p = PROV[cfg.engine];
+    $('aiBox').style.display = p ? '' : 'none';
+    if (p) {
+      const model = cfg[p.modelKey], sel = $('amodel');
+      if (sel.dataset.engine !== cfg.engine) { // switched translator: show that one's key, model and note
+        sel.dataset.engine = cfg.engine;
+        $('akey').value = cfg[p.keyKey]; $('keyMsg').textContent = '';
+        $('akeyName').textContent = p.name + ' API key';
+        $('akeyLink').href = p.link; $('akeyLink').textContent = p.linkText;
+        $('amodelName').textContent = p.name + ' model';
+        $('aiNote').textContent = p.note;
+        sel.innerHTML = '';
+        sel.add(model ? new Option(p.label(model), model) : new Option('(enter key, then tap Test)', ''));
+      }
+      if (model && ![...sel.options].some(o => o.value === model)) sel.add(new Option(p.label(model), model));
+      sel.value = model;
     }
-    if (cfg.gmodel) $('gmodel').value = cfg.gmodel;
     document.documentElement.style.setProperty('--fs', cfg.fs + 'px');
     document.body.classList.toggle('light', cfg.theme === 'light');
     document.querySelectorAll('.zh').forEach(e => e.style.display = cfg.showZh === '1' ? '' : 'none');
@@ -184,8 +199,15 @@
   });
   bind('srcLang', 'src', () => { if (running) { restartSoon = true; rec && rec.abort(); } });
   bind('engine', 'engine');
-  bind('gmodel', 'gmodel', () => { noThinkingCfg = false; store.set('noThinkCfg', ''); });
-  $('gkey').addEventListener('change', e => { cfg.gkey = e.target.value.trim(); store.set('gkey', cfg.gkey); });
+  $('amodel').addEventListener('input', e => {
+    const p = PROV[cfg.engine]; if (!p) return;
+    cfg[p.modelKey] = e.target.value; store.set(p.modelKey, e.target.value);
+    if (cfg.engine === 'gemini') { noThinkingCfg = false; store.set('noThinkCfg', ''); }
+  });
+  $('akey').addEventListener('change', e => {
+    const p = PROV[cfg.engine]; if (!p) return;
+    cfg[p.keyKey] = e.target.value.trim(); store.set(p.keyKey, cfg[p.keyKey]);
+  });
   bind('tgtLang', 'tgt'); bind('fs', 'fs'); bind('showZh', 'showZh'); bind('liveTr', 'liveTr'); bind('theme', 'theme'); bind('chunk', 'chunk');
   $('settingsBtn').onclick = () => $('settings').showModal();
   $('closeSettings').onclick = () => $('settings').close();
@@ -226,12 +248,26 @@
     return out;
   }
 
-  // ---------- Gemini (AI translation with context) ----------
+  // ---------- AI translators (Gemini / ChatGPT / Claude), given the conversation so far as context ----------
   const GAPI = 'https://generativelanguage.googleapis.com/v1beta/';
   const LANG_NAMES = { 'en': 'English', 'zh-TW': 'Traditional Chinese (Taiwan)', 'tl': 'Filipino', 'ja': 'Japanese',
     'ko': 'Korean', 'vi': 'Vietnamese', 'id': 'Indonesian' };
   const SRC_NAMES = { 'zh-TW': 'Taiwan Mandarin (Traditional Chinese)', 'zh-CN': 'Mainland Mandarin', 'yue-Hant-HK': 'Cantonese' };
-  let geminiPausedUntil = 0, noThinkingCfg = store.get('noThinkCfg', '') === '1';
+  let noThinkingCfg = store.get('noThinkCfg', '') === '1';
+  const pausedUntil = {}; // per translator: after a limit or key error, use Google Translate until this time
+
+  async function apiError(r) {
+    const j = await r.json().catch(() => ({}));
+    const err = new Error((j.error && (j.error.message || j.error.type)) || ('HTTP ' + r.status));
+    err.status = r.status;
+    return err;
+  }
+  // Model version from its name: gpt-4.1-mini → 4.1, claude-haiku-4-5-20251001 → 4.5, claude-3-5-haiku → 3.5
+  function modelVersion(id) {
+    const nums = id.replace(/-\d{8}$/, '').match(/\d+(?:\.\d+)?/g) || ['0'];
+    if (nums[0].includes('.') || !nums[1] || nums[1].length > 1) return parseFloat(nums[0]);
+    return parseFloat(nums[0] + '.' + nums[1]);
+  }
 
   // Pick the best model for fast translation from the models this key can use.
   function rankModel(name) {
@@ -254,29 +290,116 @@
       .filter(n => /^models\/gemini-/.test(n) && !/(embed|tts|image|audio|live|vision|thinking|computer|robotics|learnlm)/i.test(n))
       .sort((a, b) => rankModel(b) - rankModel(a));
   }
+  // ChatGPT: prefer the newest "mini" model (fast and cheap, good at translation).
+  function rankOpenAI(id) {
+    let s = modelVersion(id) * 100;
+    if (/-mini/.test(id)) s += 50; else if (/-nano/.test(id)) s += 10; else s += 30;
+    if (/^o\d/.test(id)) s -= 300; // reasoning-only models: slow
+    if (/chat-latest/.test(id)) s -= 50;
+    return s;
+  }
+  // Claude: prefer the newest Haiku (fastest), then Sonnet, then Opus.
+  function rankClaude(id) {
+    return modelVersion(id) * 100 + (/haiku/.test(id) ? 50 : /sonnet/.test(id) ? 30 : 0);
+  }
+  const CLAUDE_API = 'https://api.anthropic.com/v1/';
+  const claudeHeaders = key => ({ 'x-api-key': key, 'anthropic-version': '2023-06-01',
+    'anthropic-dangerous-direct-browser-access': 'true', 'Content-Type': 'application/json' });
+
+  async function listOpenAIModels(key) {
+    const r = await fetch('https://api.openai.com/v1/models', { headers: { Authorization: 'Bearer ' + key } });
+    if (!r.ok) throw await apiError(r);
+    const j = await r.json();
+    return (j.data || []).map(m => m.id)
+      .filter(id => /^(gpt-\d|o\d)/.test(id)
+        && !/(audio|realtime|tts|transcribe|search|image|instruct|codex|embedding|moderation|preview|oss|-pro|deep-research|computer|\d{4}-\d{2}-\d{2})/.test(id))
+      .sort((a, b) => rankOpenAI(b) - rankOpenAI(a));
+  }
+  async function listClaudeModels(key) {
+    const r = await fetch(CLAUDE_API + 'models?limit=100', { headers: claudeHeaders(key) });
+    if (!r.ok) throw await apiError(r);
+    const j = await r.json();
+    return (j.data || []).map(m => m.id).filter(id => /^claude-/.test(id) && !/claude-(2|instant|3-(opus|sonnet|haiku))/.test(id))
+      .sort((a, b) => rankClaude(b) - rankClaude(a));
+  }
+
+  async function openaiCall(key, model, sys, prompt) {
+    const reasoning = /^(gpt-5|o\d)/.test(model);
+    // Reasoning models: turn reasoning down for speed. Older ones only accept 'minimal', newer ones 'none'.
+    const efforts = reasoning ? [...new Set([store.get('oeff_' + model, 'none'), 'none', 'minimal', 'low', ''])] : [''];
+    for (let i = 0; i < efforts.length; i++) {
+      const body = { model, messages: [{ role: 'system', content: sys }, { role: 'user', content: prompt }], max_completion_tokens: 1024 };
+      if (efforts[i]) body.reasoning_effort = efforts[i];
+      if (!reasoning) body.temperature = 0.2;
+      const r = await fetch('https://api.openai.com/v1/chat/completions', {
+        method: 'POST', headers: { Authorization: 'Bearer ' + key, 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+      });
+      if (!r.ok) {
+        const err = await apiError(r);
+        if (r.status === 400 && /reasoning/i.test(err.message) && i < efforts.length - 1) continue;
+        throw err;
+      }
+      if (reasoning) store.set('oeff_' + model, efforts[i]);
+      const j = await r.json();
+      const out = (((j.choices || [])[0] || {}).message || {}).content || '';
+      if (!out.trim()) throw new Error('Empty reply from ChatGPT');
+      return out.trim();
+    }
+  }
+  async function claudeCall(key, model, sys, prompt) {
+    const body = { model, max_tokens: 1024, system: sys, messages: [{ role: 'user', content: prompt }], temperature: 0.2 };
+    const call = () => fetch(CLAUDE_API + 'messages', { method: 'POST', headers: claudeHeaders(key), body: JSON.stringify(body) });
+    let r = await call();
+    if (r.status === 400) { // some models reject settings like temperature: try once without
+      const err = await apiError(r);
+      if (!/temperature/i.test(err.message)) throw err;
+      delete body.temperature;
+      r = await call();
+    }
+    if (!r.ok) throw await apiError(r);
+    const j = await r.json();
+    const out = (j.content || []).filter(c => c.type === 'text').map(c => c.text).join('').trim();
+    if (!out) throw new Error('Empty reply from Claude');
+    return out;
+  }
+
+  const PROV = {
+    gemini: { name: 'Gemini', keyKey: 'gkey', modelKey: 'gmodel', link: 'https://aistudio.google.com/apikey', linkText: 'get a free key',
+      note: "Note: on Gemini's free tier Google may use what you send to improve its products. Avoid it for confidential meetings. If Gemini fails or hits its limit, the page uses Google Translate.",
+      label: m => m.replace(/^models\//, ''), def: 'models/gemini-flash-latest', list: listGeminiModels, call: geminiCall },
+    openai: { name: 'ChatGPT', keyKey: 'okey', modelKey: 'omodel', link: 'https://platform.openai.com/api-keys', linkText: 'get a key',
+      note: 'Needs an OpenAI API key with billing set up at platform.openai.com. A ChatGPT Plus subscription does not include it. You pay per use, usually well under $1 for an hour-long meeting with a "mini" model. OpenAI does not train on API data by default. If it fails, the page uses Google Translate.',
+      label: m => m, def: 'gpt-4.1-mini', list: listOpenAIModels, call: openaiCall },
+    claude: { name: 'Claude', keyKey: 'ckey', modelKey: 'cmodel', link: 'https://console.anthropic.com/settings/keys', linkText: 'get a key',
+      note: 'Needs an Anthropic API key with credits at console.anthropic.com. A Claude Pro subscription does not include it. You pay per use, usually around $1 or less for an hour-long meeting with Haiku. Anthropic does not train on API data by default. If it fails, the page uses Google Translate.',
+      label: m => m, def: 'claude-haiku-4-5', list: listClaudeModels, call: claudeCall },
+  };
+
   $('testKey').onclick = async () => {
-    const key = $('gkey').value.trim();
-    cfg.gkey = key; store.set('gkey', key);
+    const eng = cfg.engine, p = PROV[eng]; if (!p) return;
+    const key = $('akey').value.trim();
+    cfg[p.keyKey] = key; store.set(p.keyKey, key);
     if (!key) { $('keyMsg').textContent = 'Paste a key first.'; return; }
     $('keyMsg').textContent = 'Checking…';
     try {
-      const models = await listGeminiModels(key);
-      if (!models.length) throw new Error('No usable Gemini models for this key.');
-      $('gmodel').innerHTML = '';
-      models.forEach(m => $('gmodel').add(new Option(m.replace(/^models\//, ''), m)));
-      if (!models.includes(cfg.gmodel)) { cfg.gmodel = models[0]; store.set('gmodel', cfg.gmodel); }
-      $('gmodel').value = cfg.gmodel;
-      geminiPausedUntil = 0;
+      const models = await p.list(key);
+      if (!models.length) throw new Error('No usable ' + p.name + ' models for this key.');
+      const sel = $('amodel');
+      sel.innerHTML = '';
+      models.forEach(m => sel.add(new Option(p.label(m), m)));
+      if (!models.includes(cfg[p.modelKey])) { cfg[p.modelKey] = models[0]; store.set(p.modelKey, models[0]); }
+      sel.value = cfg[p.modelKey];
+      pausedUntil[eng] = 0;
       const t0 = Date.now();
-      const out = await geminiTranslate('大家好，我們開始開會吧。', []);
+      const out = await aiTranslate(eng, '大家好，我們開始開會吧。', []);
       $('keyMsg').textContent = '✅ Works (' + ((Date.now() - t0) / 1000).toFixed(1) + 's): "' + out + '"';
     } catch (e) {
       $('keyMsg').textContent = '❌ ' + e.message;
     }
   };
 
-  async function geminiTranslate(text, context) {
-    const model = cfg.gmodel || 'models/gemini-flash-latest';
+  function aiTranslate(eng, text, context) {
+    const p = PROV[eng];
     const tgt = LANG_NAMES[cfg.tgt] || cfg.tgt;
     const sys = 'You are a live interpreter at a meeting in Taiwan. The input is ' + (SRC_NAMES[cfg.src] || 'Chinese')
       + ' speech captured by automatic speech recognition, so it may have missing punctuation, homophone mistakes, or'
@@ -289,6 +412,10 @@
         + context.map(c => '- ' + c.zh + (c.en ? '  →  ' + c.en : '')).join('\n') + '\n\n';
     }
     prompt += 'NEW: ' + text;
+    return p.call(cfg[p.keyKey], cfg[p.modelKey] || p.def, sys, prompt);
+  }
+
+  async function geminiCall(key, model, sys, prompt) {
     const body = {
       systemInstruction: { parts: [{ text: sys }] },
       contents: [{ role: 'user', parts: [{ text: prompt }] }],
@@ -298,7 +425,7 @@
     if (!noThinkingCfg) body.generationConfig.thinkingConfig = { thinkingBudget: 0 };
     const call = () => fetch(GAPI + model + ':generateContent', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'x-goog-api-key': cfg.gkey },
+      headers: { 'Content-Type': 'application/json', 'x-goog-api-key': key },
       body: JSON.stringify(body),
     });
     let r = await call();
@@ -319,20 +446,21 @@
     return out;
   }
 
-  // Finished sentences: Gemini when set up, Google Translate otherwise or as a fallback.
+  // Finished sentences: the chosen AI when set up, Google Translate otherwise or as a fallback.
   async function translateFinal(zh, context) {
-    if (cfg.engine === 'gemini' && cfg.gkey && Date.now() > geminiPausedUntil) {
+    const eng = cfg.engine, p = PROV[eng];
+    if (p && cfg[p.keyKey] && Date.now() > (pausedUntil[eng] || 0)) {
       try {
-        return { text: await geminiTranslate(zh, context), by: 'Gemini' };
+        return { text: await aiTranslate(eng, zh, context), by: p.name };
       } catch (e) {
         if (e.status === 429) {
-          geminiPausedUntil = Date.now() + 60000;
-          status('Gemini free limit reached — using Google Translate for 1 minute.', true);
-        } else if (e.status === 400 || e.status === 401 || e.status === 403) {
-          geminiPausedUntil = Date.now() + 5 * 60000;
-          status('Gemini key problem (' + e.message + ') — using Google Translate.', true);
+          pausedUntil[eng] = Date.now() + 60000;
+          status(p.name + ' limit reached (' + e.message + ') — using Google Translate for 1 minute.', true);
+        } else if (e.status === 400 || e.status === 401 || e.status === 403 || e.status === 404) {
+          pausedUntil[eng] = Date.now() + 5 * 60000;
+          status(p.name + ' key problem (' + e.message + ') — using Google Translate.', true);
         } else {
-          status('Gemini error (' + e.message + ') — used Google Translate.', true);
+          status(p.name + ' error (' + e.message + ') — used Google Translate.', true);
         }
       }
     }
