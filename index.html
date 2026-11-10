@@ -38,12 +38,16 @@
   #log {
     flex: 1; overflow-y: auto; padding: 12px 14px 20px; scroll-behavior: smooth;
   }
-  .entry { padding: 10px 0; border-bottom: 1px solid var(--line); }
+  /* Each speaker turn is a block with a colored bar; the color alternates when the speaker changes. */
+  .entry { padding: 6px 0 6px 12px; border-left: 3px solid var(--accent); }
+  .entry.alt { border-left-color: #f0a541; }
+  .entry.turn-start { margin-top: 14px; padding-top: 8px; }
+  #entries > .entry:first-child { margin-top: 0; }
   .entry .zh { color: var(--zh); font-size: calc(var(--fs) * 0.8); line-height: 1.45; }
   .entry .en { font-size: var(--fs); line-height: 1.4; margin-top: 4px; font-weight: 500; }
   .entry .t { color: var(--muted); font-size: 11px; margin-top: 2px; }
   .entry.pending .en { color: var(--muted); font-style: italic; }
-  #live { border-bottom: none; opacity: 0.75; }
+  #live { border-left-color: var(--line); opacity: 0.75; margin-top: 6px; }
   #live:empty { display: none; }
   #empty { color: var(--muted); text-align: center; margin-top: 18vh; line-height: 1.6; padding: 0 20px; }
   footer {
@@ -146,6 +150,13 @@
     <option value="full">Off: wait for full sentences (best accuracy)</option>
   </select>
   <div id="cadInfo" style="font-size:12px;color:var(--muted);margin-top:4px">Learns each speaker's rhythm: a pause means a gap clearly longer than how they normally talk.</div>
+  <label for="turns">Separate different speakers</label>
+  <select id="turns">
+    <option value="voice">By voice and long pauses (experimental)</option>
+    <option value="pause">By long pauses only</option>
+    <option value="off">Off</option>
+  </select>
+  <div id="turnInfo" style="font-size:12px;color:var(--muted);margin-top:4px"></div>
   <label for="theme">Theme</label>
   <select id="theme"><option value="dark">Dark</option><option value="light">Light</option></select>
   <div class="row"><button id="closeSettings">Done</button></div>
@@ -165,14 +176,14 @@
   const cfg = {
     src: store.get('src', 'zh-TW'), tgt: store.get('tgt', 'en'), fs: store.get('fs', '20'),
     showZh: store.get('showZh', '1'), liveTr: store.get('liveTr', '1'), theme: store.get('theme', 'dark'),
-    chunk: store.get('chunk', 'fast'),
+    chunk: store.get('chunk', 'fast'), turns: store.get('turns', 'voice'),
     engine: store.get('engine', 'google'), gkey: store.get('gkey', ''), gmodel: store.get('gmodel', ''),
     okey: store.get('okey', ''), omodel: store.get('omodel', ''), ckey: store.get('ckey', ''), cmodel: store.get('cmodel', ''),
   };
   function applyCfg() {
     $('srcLang').value = cfg.src; $('tgtLang').value = cfg.tgt; $('fs').value = cfg.fs;
     $('fsVal').textContent = cfg.fs + 'px'; $('showZh').value = cfg.showZh;
-    $('liveTr').value = cfg.liveTr; $('theme').value = cfg.theme; $('chunk').value = cfg.chunk;
+    $('liveTr').value = cfg.liveTr; $('theme').value = cfg.theme; $('chunk').value = cfg.chunk; $('turns').value = cfg.turns;
     $('engine').value = cfg.engine;
     const p = PROV[cfg.engine];
     $('aiBox').style.display = p ? '' : 'none';
@@ -210,7 +221,12 @@
     cfg[p.keyKey] = e.target.value.trim(); store.set(p.keyKey, cfg[p.keyKey]);
   });
   bind('tgtLang', 'tgt'); bind('fs', 'fs'); bind('showZh', 'showZh'); bind('liveTr', 'liveTr'); bind('theme', 'theme'); bind('chunk', 'chunk', () => showCadence());
-  $('settingsBtn').onclick = () => { showCadence(); $('settings').showModal(); };
+  bind('turns', 'turns', () => {
+    if (cfg.turns === 'voice') store.set('voiceBroken', ''); // let it try the voice listener again
+    stopVoice(); if (running) startVoice();
+    showTurnInfo();
+  });
+  $('settingsBtn').onclick = () => { showCadence(); showTurnInfo(); $('settings').showModal(); };
   $('closeSettings').onclick = () => $('settings').close();
 
   // ---------- status ----------
@@ -481,7 +497,10 @@
   }
   function renderEntry(e) {
     const div = document.createElement('div');
-    div.className = 'entry' + (e.en ? '' : ' pending');
+    const turnNo = e.turn || 0, prev = $('entries').lastElementChild;
+    div.className = 'entry' + (e.en ? '' : ' pending') + (turnNo % 2 ? ' alt' : '')
+      + (prev && +prev.dataset.turn !== turnNo ? ' turn-start' : '');
+    div.dataset.turn = turnNo;
     div.innerHTML = '<div class="zh"></div><div class="en"></div><div class="t"></div>';
     div.querySelector('.zh').textContent = e.zh;
     div.querySelector('.zh').style.display = cfg.showZh === '1' ? '' : 'none';
@@ -496,7 +515,9 @@
     zh = zh.trim();
     if (!/[\p{L}\p{N}]/u.test(zh)) return; // skip empty or punctuation-only pieces
     const stick = nearBottom();
-    const e = { zh, en: '', time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }) };
+    if (newTurnPending && entries.length) turn++;
+    newTurnPending = false;
+    const e = { zh, en: '', turn, time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }) };
     const context = entries.slice(-4).map(c => ({ zh: c.zh, en: c.en }));
     entries.push(e);
     const div = renderEntry(e);
@@ -512,7 +533,9 @@
 
   // live (interim) line
   let liveSeq = 0, liveTimer = null, lastLiveText = '';
+  const liveHist = []; // recent live text with times, to split it where a new voice started
   function showLive(zh) {
+    liveHist.push({ t: performance.now(), text: zh.trim() ? zh : '' }); if (liveHist.length > 60) liveHist.shift();
     const live = $('live');
     if (!zh.trim()) { live.innerHTML = ''; lastLiveText = ''; return; }
     if (!live.firstChild) live.innerHTML = '<div class="zh"></div><div class="en"></div>';
@@ -613,6 +636,118 @@
     }
   }
 
+  // ---------- speaker turns: start a new block when someone else (probably) starts talking ----------
+  let turn = 0, newTurnPending = false, lastSpeechAt = 0;
+  // voiceStartedAt: when the new voice began. Only text recognized before then (plus the recognizer's
+  // short delay) belongs to the previous speaker; the rest stays for the new one.
+  function markNewTurn(voiceStartedAt) {
+    if (cfg.turns === 'off') return;
+    let old = lastLiveText;
+    if (voiceStartedAt) {
+      const h = liveHist.filter(x => x.t <= voiceStartedAt + 300).pop();
+      old = h && h.text && lastLiveText.startsWith(h.text) ? h.text : '';
+    }
+    if (old) {
+      const rest = lastLiveText.slice(old.length);
+      commitChunk(old);
+      if (rest) showLive(rest);
+    }
+    newTurnPending = true;
+  }
+  // A silence much longer than this speaker's normal pause usually means someone else talks next.
+  const turnGapMs = () => Math.max(1500, 2.5 * pauseMs(CHUNK[cfg.chunk] || CHUNK.fast));
+
+  // Voice change: a second, light listener on the mic follows the voice pitch of whoever is talking.
+  const voice = { ctx: null, stream: null, timer: null, prof: [], utt: [], checked: false, quiet: 0, noise: 0.01, loudNoWords: 0, ds: null };
+  function showTurnInfo() {
+    $('turnInfo').textContent = cfg.turns === 'off' ? 'Everything is shown as one stream.'
+      : cfg.turns === 'pause' ? 'A new block starts after a long silence.'
+      : store.get('voiceBroken', '') === '1' ? 'Voice detection was turned off: this phone could not share the microphone with speech recognition. Using long pauses only. (Pick this option again to retry.)'
+      : 'A new block starts when the voice clearly changes (for example a man then a woman) or after a long silence. Similar voices may not be told apart.'
+        + (voice.ctx ? ' Listening to voices ✓' : '');
+  }
+  async function startVoice() {
+    if (cfg.turns !== 'voice' || store.get('voiceBroken', '') === '1' || !navigator.mediaDevices || voice.ctx) return;
+    try {
+      voice.stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false } });
+      if (!running) { stopVoice(); return; }
+      voice.ctx = new (window.AudioContext || window.webkitAudioContext)();
+      voice.ctx.resume && voice.ctx.resume();
+      const an = voice.ctx.createAnalyser(); an.fftSize = 2048;
+      voice.ctx.createMediaStreamSource(voice.stream).connect(an);
+      const buf = new Float32Array(an.fftSize);
+      Object.assign(voice, { prof: [], utt: [], checked: false, quiet: 0, noise: 0.01, loudNoWords: 0 });
+      voice.timer = setInterval(() => voiceTick(an, buf), 50);
+    } catch (e) { stopVoice(); }
+    showTurnInfo();
+  }
+  function stopVoice() {
+    clearInterval(voice.timer); voice.timer = null;
+    try { voice.stream && voice.stream.getTracks().forEach(t => t.stop()); } catch {}
+    try { voice.ctx && voice.ctx.close(); } catch {}
+    voice.stream = null; voice.ctx = null;
+  }
+  function voiceBroken() { // the phone can't share the mic: keep translating, separate by pauses only
+    stopVoice(); store.set('voiceBroken', '1');
+    if (running) { restartSoon = true; try { rec && rec.abort(); } catch {} } // restart listening with the mic to itself
+    setTimeout(() => status('Voice detection turned off (this phone cannot share the mic). Speakers are separated by pauses.', true), 800);
+  }
+  function voiceTick(an, buf) {
+    an.getFloatTimeDomainData(buf);
+    let rms = 0; for (let i = 0; i < buf.length; i++) rms += buf[i] * buf[i];
+    rms = Math.sqrt(rms / buf.length);
+    // follow the background noise level slowly, so "speaking" means clearly louder than the room
+    voice.noise = rms < voice.noise * 2 ? voice.noise * 0.95 + rms * 0.05 : voice.noise * 0.998 + rms * 0.002;
+    if (rms < Math.max(0.006, voice.noise * 3)) {
+      voice.quiet += 50;
+      if (voice.quiet >= 250 && voice.utt.length) endUtterance();
+      return;
+    }
+    if (voice.quiet >= 250 || !voice.onsetAt) voice.onsetAt = performance.now() - 50; // a new stretch of talking starts
+    voice.quiet = 0;
+    // Someone is clearly talking but speech recognition hears nothing for a long time: the mic is not shared.
+    voice.loudNoWords += 50;
+    if (voice.loudNoWords > 10000) { voiceBroken(); return; }
+    const f = pitch(buf, voice.ctx.sampleRate);
+    if (!f) return;
+    voice.utt.push(f);
+    if (voice.checked) { voice.prof.push(f); if (voice.prof.length > 80) voice.prof.shift(); }
+    else if (voice.utt.length >= 12) checkVoice(); // ~0.6 s of voiced sound is enough to compare
+  }
+  function endUtterance() {
+    if (!voice.checked && voice.utt.length >= 6) checkVoice();
+    voice.utt = []; voice.checked = false;
+  }
+  function checkVoice() {
+    voice.checked = true;
+    const now = median(voice.utt);
+    if (voice.prof.length >= 12) {
+      const semis = 12 * Math.log2(now / median(voice.prof));
+      if (Math.abs(semis) >= 4) { markNewTurn(voice.onsetAt); voice.prof = []; } // clearly higher or lower voice: someone else
+    }
+    voice.prof.push(...voice.utt); if (voice.prof.length > 80) voice.prof.splice(0, voice.prof.length - 80);
+  }
+  // Voice pitch (Hz) of one audio frame, or 0 if it is not a clear voiced sound.
+  function pitch(buf, sampleRate) {
+    const n = buf.length >> 1, x = voice.ds && voice.ds.length === n ? voice.ds : (voice.ds = new Float32Array(n));
+    for (let i = 0; i < n; i++) x[i] = (buf[2 * i] + buf[2 * i + 1]) / 2; // half the sample rate is plenty for voices
+    const sr = sampleRate / 2, minLag = Math.floor(sr / 400), maxLag = Math.min(n - 64, Math.ceil(sr / 70));
+    const corr = new Float32Array(maxLag + 1);
+    let best = 0;
+    for (let lag = minLag; lag <= maxLag; lag++) {
+      let s = 0, e1 = 0, e2 = 0;
+      for (let i = 0; i < n - lag; i++) { const a = x[i], b = x[i + lag]; s += a * b; e1 += a * a; e2 += b * b; }
+      corr[lag] = s / Math.sqrt(e1 * e2 + 1e-12);
+      if (corr[lag] > best) best = corr[lag];
+    }
+    if (best < 0.6) return 0;
+    // the first strong peak is the true pitch (later peaks are its multiples)
+    for (let lag = minLag + 1; lag < maxLag; lag++) {
+      if (corr[lag] >= 0.9 * best && corr[lag] >= corr[lag - 1] && corr[lag] >= corr[lag + 1]) return sr / lag;
+    }
+    return 0;
+  }
+
   async function keepAwake() {
     try { if ('wakeLock' in navigator) wakeLock = await navigator.wakeLock.request('screen'); } catch {}
   }
@@ -629,6 +764,9 @@
     rec.maxAlternatives = 1;
 
     rec.onresult = (ev) => {
+      const nowMs = performance.now();
+      if (lastSpeechAt && nowMs - lastSpeechAt > turnGapMs()) markNewTurn();
+      lastSpeechAt = nowMs; voice.loudNoWords = 0;
       let interim = '';
       for (let i = ev.resultIndex; i < ev.results.length; i++) {
         const r = ev.results[i];
@@ -642,6 +780,7 @@
     };
     rec.onerror = (ev) => {
       if (ev.error === 'no-speech' || ev.error === 'aborted') return;
+      if (ev.error === 'audio-capture' && voice.ctx) { voiceBroken(); return; }
       if (ev.error === 'not-allowed' || ev.error === 'service-not-allowed') {
         status('Microphone blocked. Allow mic access for this page in your browser settings, then tap Start.', true);
         stop();
@@ -674,14 +813,17 @@
       return;
     }
     running = true; quickFails = 0; resetCadence();
+    lastSpeechAt = 0; newTurnPending = true; // a new listening session starts a new block
     $('mic').textContent = '■ Stop'; $('mic').classList.add('on');
     keepAwake();
-    try { startRec(); } catch (e) { status('Could not start: ' + e.message, true); stop(); }
+    try { startRec(); } catch (e) { status('Could not start: ' + e.message, true); stop(); return; }
+    startVoice();
   }
   function stop() {
     running = false;
     $('mic').textContent = '▶ Start'; $('mic').classList.remove('on');
     try { rec && rec.stop(); } catch {}
+    stopVoice();
     try { wakeLock && wakeLock.release(); } catch {}
     wakeLock = null;
     if (!$('status').classList.contains('err')) status('Stopped.');
@@ -690,7 +832,9 @@
 
   // ---------- copy / clear ----------
   $('copyBtn').onclick = async () => {
-    const txt = entries.map(e => `[${e.time}] ${e.zh}\n${e.en}`).join('\n\n');
+    // a line "———" marks where the speaker changed
+    const txt = entries.map((e, i) => (i && (e.turn || 0) !== (entries[i - 1].turn || 0) ? '———\n' : '')
+      + `[${e.time}] ${e.zh}\n${e.en}`).join('\n\n');
     if (!txt) { status('Nothing to copy yet.'); return; }
     try { await navigator.clipboard.writeText(txt); status('Transcript copied (' + entries.length + ' lines).'); }
     catch { status('Copy not allowed by this browser.', true); }
@@ -710,6 +854,7 @@
   // ---------- init ----------
   applyCfg();
   try { (JSON.parse(localStorage.getItem('lt_log') || '[]')).forEach(e => { entries.push(e); renderEntry(e); }); } catch {}
+  turn = entries.length ? (entries[entries.length - 1].turn || 0) : 0;
   scrollDown(true);
   if (!SR) status('Speech recognition not available in this browser. Use Chrome, Edge, or Safari.', true);
   else if (!window.isSecureContext) status('Mic needs HTTPS (or localhost). Open this page over https://', true);
