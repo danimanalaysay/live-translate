@@ -252,10 +252,14 @@
     cfg[p.modelKey] = e.target.value; store.set(p.modelKey, e.target.value);
     if (cfg.engine === 'gemini') { noThinkingCfg = false; store.set('noThinkCfg', ''); }
   });
-  $('akey').addEventListener('change', e => {
+  // Save the key as soon as it is pasted or typed (not only when the field loses focus).
+  const saveKey = e => {
     const p = PROV[cfg.engine]; if (!p) return;
     cfg[p.keyKey] = e.target.value.trim(); store.set(p.keyKey, cfg[p.keyKey]);
-  });
+    pausedUntil[cfg.engine] = 0;
+  };
+  $('akey').addEventListener('input', saveKey);
+  $('akey').addEventListener('change', saveKey);
   bind('tgtLang', 'tgt'); bind('fs', 'fs'); bind('showZh', 'showZh'); bind('liveTr', 'liveTr'); bind('theme', 'theme'); bind('chunk', 'chunk', () => showCadence());
   bind('polish', 'polish');
   bind('turns', 'turns', () => {
@@ -267,7 +271,19 @@
   $('closeSettings').onclick = () => $('settings').close();
 
   // ---------- status ----------
-  function status(msg, err) { $('status').textContent = msg; $('status').classList.toggle('err', !!err); }
+  let errShownAt = 0;
+  function status(msg, err) {
+    $('status').textContent = msg; $('status').classList.toggle('err', !!err);
+    if (err) errShownAt = Date.now();
+  }
+  // Which translator finished sentences will actually use right now.
+  function translatorName() {
+    const p = PROV[cfg.engine];
+    if (!p) return 'Google Translate';
+    if (!cfg[p.keyKey]) return 'Google Translate (' + p.name + ' has no key)';
+    if (Date.now() < (pausedUntil[cfg.engine] || 0)) return 'Google Translate (' + p.name + ' paused)';
+    return p.name;
+  }
 
   // ---------- translation (free endpoints, Google first, MyMemory fallback) ----------
   const cache = new Map();
@@ -517,6 +533,8 @@
           status(p.name + ' error (' + e.message + ') — used Google Translate.', true);
         }
       }
+    } else if (p && !cfg[p.keyKey]) {
+      status(p.name + ' is selected but has no key saved — using Google Translate. Open ⚙️, paste the key, tap Test key.', true);
     }
     return { text: await translate(zh), by: 'Google' };
   }
@@ -869,7 +887,11 @@
         status('Speech error: ' + ev.error, true);
       }
     };
-    rec.onstart = () => { lastStart = Date.now(); resetSeg(); status('Listening (' + $('srcLang').selectedOptions[0].text + ')…'); };
+    rec.onstart = () => {
+      lastStart = Date.now(); resetSeg();
+      if ($('status').classList.contains('err') && Date.now() - errShownAt < 8000) return; // keep a fresh warning visible
+      status('Listening (' + $('srcLang').selectedOptions[0].text + ') · translating with ' + translatorName() + '…');
+    };
     rec.onend = () => {
       // flush any unfinished interim text as a sentence
       if (lastLiveText) { const t = lastLiveText; clearLive(); addFinal(t); }
@@ -889,7 +911,7 @@
       status('This browser has no speech recognition. Use Chrome (Android/PC), Edge (PC) or Safari (iPhone).', true);
       return;
     }
-    running = true; quickFails = 0; resetCadence();
+    running = true; quickFails = 0; resetCadence(); errShownAt = 0;
     lastSpeechAt = 0; newTurnPending = true; // a new listening session starts a new block
     // A new meeting starts if nothing was said in the last 30 minutes.
     const last = entries[entries.length - 1];
