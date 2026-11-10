@@ -149,6 +149,22 @@
     </div>
     <p id="aiNote" style="font-size:12px;color:var(--muted);margin:8px 0 0"></p>
   </div>
+  <label for="listener">Listener (speech to text)</label>
+  <select id="listener">
+    <option value="phone">Phone's built-in speech recognition (free, needs a close speaker)</option>
+    <option value="groq">Groq Whisper (free key, hears far/quiet speakers, mic boost)</option>
+  </select>
+  <div id="groqBox">
+    <label for="qkey">Groq API key <a href="https://console.groq.com/keys" target="_blank" rel="noopener" style="color:var(--accent)">get a free key</a></label>
+    <input type="password" id="qkey" autocomplete="off" spellcheck="false" placeholder="gsk_… (saved on this device only)">
+    <label for="gain">Microphone boost: <span id="gainVal"></span></label>
+    <input type="range" id="gain" min="1" max="10" step="0.5">
+    <div class="row" style="justify-content:flex-start;margin-top:8px">
+      <button id="testQ">Test mic + key</button>
+      <span id="qMsg" style="font-size:13px;color:var(--muted);align-self:center"></span>
+    </div>
+    <p style="font-size:12px;color:var(--muted);margin:8px 0 0">Records the room itself (with the boost above), sends short clips to Groq's Whisper to write down, then translates with the translator above. Text appears a few seconds after it is said. Groq's free plan is enough for about 2 hours of talk per hour.</p>
+  </div>
   <label for="fs">Text size: <span id="fsVal"></span></label>
   <input type="range" id="fs" min="14" max="40" step="1">
   <label for="showZh">Show original Chinese</label>
@@ -234,6 +250,7 @@
     showZh: store.get('showZh', '1'), liveTr: store.get('liveTr', '1'), theme: store.get('theme', 'dark'),
     chunk: store.get('chunk', 'fast'), turns: store.get('turns', 'voice'), polish: store.get('polish', '1'),
     autoEn: store.get('autoEn', '1'), flow: store.get('flow', 'transcribe'),
+    listener: store.get('listener', 'phone'), qkey: store.get('qkey', ''), gain: store.get('gain', '4'),
     engine: store.get('engine', 'google'), gkey: store.get('gkey', ''), gmodel: store.get('gmodel', ''),
     okey: store.get('okey', ''), omodel: store.get('omodel', ''), ckey: store.get('ckey', ''), cmodel: store.get('cmodel', ''),
   };
@@ -244,6 +261,10 @@
     $('fsVal').textContent = cfg.fs + 'px'; $('showZh').value = cfg.showZh;
     $('liveTr').value = cfg.liveTr; $('theme').value = cfg.theme; $('chunk').value = cfg.chunk; $('turns').value = cfg.turns; $('polish').value = cfg.polish; $('autoEn').value = cfg.autoEn;
     $('flow').value = cfg.flow;
+    $('listener').value = cfg.listener; $('groqBox').style.display = cfg.listener === 'groq' ? '' : 'none';
+    if (document.activeElement !== $('qkey')) $('qkey').value = cfg.qkey;
+    $('gain').value = cfg.gain; $('gainVal').textContent = cfg.gain + '×';
+    if (gq.gainNode) gq.gainNode.gain.value = +cfg.gain;
     $('liveOnly').style.display = tf() ? 'none' : '';
     $('flowInfo').textContent = tf()
       ? 'The original words appear first, as they are heard. When the speaker pauses (or after about 20 seconds of non-stop talking), the whole paragraph is translated at once, with the paragraphs before it as context. Listens for one language only.'
@@ -281,6 +302,10 @@
     stopVoice(); if (running) startVoice();
     showTurnInfo();
   });
+  bind('listener', 'listener', () => { if (running) { stop(); start(); } });
+  bind('gain', 'gain');
+  const saveQ = e => { cfg.qkey = e.target.value.trim(); store.set('qkey', cfg.qkey); };
+  $('qkey').addEventListener('input', saveQ); $('qkey').addEventListener('change', saveQ);
   bind('engine', 'engine');
   $('amodel').addEventListener('input', e => {
     const p = PROV[cfg.engine]; if (!p) return;
@@ -621,14 +646,14 @@
     $('empty').style.display = 'none';
     return div;
   }
-  async function addFinal(zh) {
+  async function addFinal(zh, langOverride) {
     zh = zh.trim();
     if (!/[\p{L}\p{N}]/u.test(zh)) return; // skip empty or punctuation-only pieces
     const stick = nearBottom();
-    if (newTurnPending) closeStatement();
+    const lang = langOverride || activeLang;
+    if (newTurnPending || (stmt.length && stmt[0].e.lang !== lang)) closeStatement(); // a paragraph holds one language
     if (newTurnPending && entries.length) turn++;
     newTurnPending = false;
-    const lang = activeLang;
     const e = { zh, en: '', turn, mt: meetingId, ts: Date.now(), lang,
       time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }) };
     const context = entries.slice(-4).map(c => ({ zh: c.zh, en: c.en }));
@@ -641,7 +666,7 @@
       const n = stmt.reduce((k, x) => k + x.e.zh.length, 0);
       clearTimeout(paraTimer);
       if (n >= (isSpaced() ? 220 : 90)) closeStatement();
-      else paraTimer = setTimeout(closeStatement, PARA_PAUSE);
+      else paraTimer = setTimeout(closeStatement, useGroq() ? 4000 : PARA_PAUSE); // Groq text comes in clips a few seconds apart
       if (stick) scrollDown(true);
       return;
     }
@@ -982,7 +1007,15 @@
     const ok = b => b ? '✅' : '⬜';
     let hint = '';
     const secs = (Date.now() - dg.startedAt) / 1000;
-    if (iosNotSafari) hint = IOS_MSG;
+    if (useGroq()) {
+      const bars = Math.max(0, Math.min(10, Math.round(gq.level * 50)));
+      if (secs > 10 && !gq.sent) hint = 'No speech detected yet: raise the Microphone boost in ⚙️, or move the phone closer.';
+      $('diag').textContent = 'Check: ' + ok(dg.audio) + ' mic  level ' + '▮'.repeat(bars) + '▯'.repeat(10 - bars)
+        + '  · clips sent ' + gq.sent + ', written ' + dg.results + (dg.err ? '  · last error: ' + dg.err : '') + (hint ? '\n⚠️ ' + hint : '');
+      $('diag').style.whiteSpace = 'pre-wrap';
+      return;
+    }
+    if (iosNotSafari) hint = IOS_MSG + ' Or choose the Groq listener in ⚙️, which works in any browser.';
     else if (isIOS && dg.err === 'service-not-allowed') hint = 'Turn on Dictation: iPhone Settings → General → Keyboard → Enable Dictation (and Siri in Settings → Siri). Then reload this page.';
     else if (dg.err === 'not-allowed' || dg.err === 'service-not-allowed') hint = 'Microphone permission is blocked for this page.';
     else if (dg.err === 'network') hint = 'The phone cannot reach Google\'s speech service: check internet / Wi-Fi.';
@@ -1073,8 +1106,147 @@
     rec.start();
   }
 
+  // ---------- Groq Whisper listener: record the room ourselves (with a volume boost) and send short clips to be written down ----------
+  const gq = { ctx: null, stream: null, gainNode: null, an: null, out: null, rec: null, timer: null, mime: '', clipStart: 0,
+    quietMs: 0, speechMs: 0, level: 0, noise: 0.01, chain: Promise.resolve(), sent: 0, tail: '', ticks: 0 };
+  const GROQ_URL = 'https://api.groq.com/openai/v1/audio/transcriptions';
+  const useGroq = () => cfg.listener === 'groq';
+  function pickMime() {
+    if (!window.MediaRecorder || !MediaRecorder.isTypeSupported) return '';
+    return ['audio/webm;codecs=opus', 'audio/mp4', 'audio/webm', 'audio/ogg;codecs=opus'].find(m => MediaRecorder.isTypeSupported(m)) || '';
+  }
+  async function openBoostedMic() {
+    const ctx = new (window.AudioContext || window.webkitAudioContext)(); // made during the tap, so iPhone allows it
+    let stream;
+    try { stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: false, noiseSuppression: true, autoGainControl: true } }); }
+    catch (e) { ctx.close(); throw new Error('Microphone not allowed (' + e.message + ')'); }
+    try { await ctx.resume(); } catch {}
+    const src = ctx.createMediaStreamSource(stream);
+    const gain = ctx.createGain(); gain.gain.value = +cfg.gain;
+    const comp = ctx.createDynamicsCompressor(); // keeps loud moments from distorting after the boost
+    comp.threshold.value = -20; comp.knee.value = 10; comp.ratio.value = 8; comp.attack.value = 0.005; comp.release.value = 0.25;
+    const an = ctx.createAnalyser(); an.fftSize = 1024;
+    const dest = ctx.createMediaStreamDestination();
+    src.connect(gain); gain.connect(comp); comp.connect(an); comp.connect(dest);
+    return { ctx, stream, gain, an, out: dest.stream };
+  }
+  // Whisper sometimes "hears" video-subtitle phrases in silence or noise: drop those.
+  const HALLU = /(字幕|訂閱|订阅|點贊|点赞|轉發|打賞|明鏡|謝謝觀看|谢谢观看|感謝觀看|感谢观看|Amara|請不吝|请不吝|優優|以下是台灣)/i;
+  function cleanWhisper(t) {
+    t = (t || '').trim();
+    if (!t || HALLU.test(t) || /^[\s\p{P}\p{S}]*$/u.test(t)) return '';
+    return t;
+  }
+  async function groqTranscribe(blob) {
+    const ext = /mp4|aac|m4a/.test(blob.type) ? 'm4a' : /ogg/.test(blob.type) ? 'ogg' : 'webm';
+    const fd = new FormData();
+    fd.append('file', blob, 'clip.' + ext);
+    fd.append('model', 'whisper-large-v3');
+    fd.append('temperature', '0');
+    fd.append('response_format', 'json');
+    // Chinese sources: let Whisper detect the language per clip, so English said in a Mandarin class comes out as English.
+    if (base(cfg.src) === 'en') fd.append('language', 'en');
+    fd.append('prompt', (base(cfg.src) === 'en' ? '' : '以下是台灣的課堂或會議內容，使用繁體中文。') + gq.tail);
+    const r = await fetch(GROQ_URL, { method: 'POST', headers: { Authorization: 'Bearer ' + cfg.qkey }, body: fd });
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok) { const e = new Error((j.error && j.error.message) || ('HTTP ' + r.status)); e.status = r.status; throw e; }
+    return cleanWhisper(j.text);
+  }
+  function sendClip(blob) {
+    if (blob.size < 1500) return;
+    gq.sent++;
+    const p = groqTranscribe(blob);
+    p.catch(() => {});
+    gq.chain = gq.chain.then(() => p).then(text => { // keep the clips in the order they were said
+      if (!text) return;
+      dg.results++; dg.err = '';
+      gq.tail = (gq.tail + text).slice(-80);
+      clearTimeout(paraTimer);
+      addFinal(text, looksEnglish(text) ? 'en-US' : undefined);
+    }).catch(e => {
+      dg.err = e.status === 401 ? 'Groq key not accepted' : e.status === 429 ? 'Groq free limit reached' : e.message;
+      status(e.status === 401 ? 'Groq key not accepted. Open ⚙️ and paste it again.'
+        : e.status === 429 ? 'Groq free limit reached for now: a few seconds of speech may be missing. It continues automatically.'
+        : 'Groq error: ' + e.message, true);
+    });
+  }
+  function newClip() {
+    const old = gq.rec, hadSpeech = gq.speechMs >= 400;
+    gq.speechMs = 0; gq.quietMs = 0; gq.clipStart = Date.now();
+    gq.rec = null;
+    if (running && gq.out) {
+      const r = new MediaRecorder(gq.out, gq.mime ? { mimeType: gq.mime } : undefined), chunks = [];
+      r.ondataavailable = e => { if (e.data && e.data.size) chunks.push(e.data); };
+      r.onstop = () => { if (r._send) sendClip(new Blob(chunks, { type: r.mimeType || gq.mime || 'audio/webm' })); };
+      r.start();
+      gq.rec = r;
+    }
+    if (old && old.state !== 'inactive') { old._send = hadSpeech; old.stop(); }
+  }
+  async function startGroq() {
+    Object.assign(gq, { sent: 0, tail: '', chain: Promise.resolve(), level: 0, noise: 0.01 });
+    if (!window.MediaRecorder) { status('This browser cannot record audio. Update the phone, or use Safari / Chrome.', true); stop(); return; }
+    let m;
+    try { m = await openBoostedMic(); }
+    catch (e) { status(e.message + '. Allow the microphone for this page, then tap Start.', true); stop(); return; }
+    if (!running) { m.stream.getTracks().forEach(t => t.stop()); m.ctx.close(); return; }
+    Object.assign(gq, { ctx: m.ctx, stream: m.stream, gainNode: m.gain, an: m.an, out: m.out, mime: pickMime() });
+    dg.audio = true;
+    newClip();
+    const buf = new Float32Array(gq.an.fftSize);
+    gq.timer = setInterval(() => {
+      gq.an.getFloatTimeDomainData(buf);
+      let s = 0; for (let i = 0; i < buf.length; i++) s += buf[i] * buf[i];
+      const rms = Math.sqrt(s / buf.length);
+      gq.level = gq.level * 0.6 + rms * 0.4;
+      gq.noise = rms < gq.noise * 2 ? gq.noise * 0.95 + rms * 0.05 : gq.noise * 0.998 + rms * 0.002;
+      if (rms > Math.max(0.008, gq.noise * 2.5)) { gq.speechMs += 50; gq.quietMs = 0; dg.speech = dg.speech || 1; }
+      else gq.quietMs += 50;
+      const dur = Date.now() - gq.clipStart;
+      // send a clip at the speaker's pause (once there is some speech), or every 15 s of non-stop talk
+      if ((gq.speechMs >= 1000 && gq.quietMs >= 600 && dur >= 2500) || dur >= 15000) newClip();
+      if (++gq.ticks % 5 === 0) showDiag();
+    }, 50);
+  }
+  function stopGroq() {
+    clearInterval(gq.timer); gq.timer = null;
+    const r = gq.rec; gq.rec = null;
+    if (r && r.state !== 'inactive') { r._send = gq.speechMs >= 400; r.stop(); }
+    const { stream, ctx } = gq;
+    Object.assign(gq, { stream: null, ctx: null, gainNode: null, an: null, out: null });
+    setTimeout(() => { try { stream && stream.getTracks().forEach(t => t.stop()); } catch {} try { ctx && ctx.close(); } catch {} }, 300);
+  }
+  $('testQ').onclick = async () => {
+    if (!cfg.qkey) { $('qMsg').textContent = 'Paste the key first.'; return; }
+    if (running) { $('qMsg').textContent = 'Tap Stop first, then test.'; return; }
+    $('testQ').disabled = true;
+    let m;
+    try {
+      m = await openBoostedMic();
+      $('qMsg').textContent = '🎙️ Recording 4 seconds: say something…';
+      const mime = pickMime(), rec2 = new MediaRecorder(m.out, mime ? { mimeType: mime } : undefined), chunks = [];
+      rec2.ondataavailable = e => { if (e.data.size) chunks.push(e.data); };
+      const buf = new Float32Array(m.an.fftSize); let peak = 0;
+      const t = setInterval(() => { m.an.getFloatTimeDomainData(buf); for (let i = 0; i < buf.length; i++) peak = Math.max(peak, Math.abs(buf[i])); }, 50);
+      const done = new Promise(r => { rec2.onstop = r; });
+      rec2.start(); await new Promise(r => setTimeout(r, 4000)); rec2.stop(); await done; clearInterval(t);
+      $('qMsg').textContent = 'Sending to Groq…';
+      const text = await groqTranscribe(new Blob(chunks, { type: rec2.mimeType || mime || 'audio/webm' }));
+      $('qMsg').textContent = '✅ Key works. Loudness ' + Math.round(peak * 100) + '% '
+        + (peak < 0.15 ? '(quiet: raise the boost)' : peak > 0.9 ? '(very loud: lower the boost if words come out wrong)' : '(good)')
+        + '. Heard: "' + (text || '(nothing)') + '"';
+    } catch (e) {
+      $('qMsg').textContent = '❌ ' + (e.status === 401 ? 'Key not accepted: copy it again from console.groq.com/keys.' : e.message);
+    } finally {
+      try { m && m.stream.getTracks().forEach(t => t.stop()); m && m.ctx.close(); } catch {}
+      $('testQ').disabled = false;
+    }
+  };
+
   function start() {
-    if (!SR) {
+    const g = useGroq();
+    if (g && !cfg.qkey) { status('Groq is chosen as the listener but has no key: open ⚙️ and paste your Groq key (or choose the phone\'s listener).', true); return; }
+    if (!g && !SR) {
       status('This browser has no speech recognition. Use Chrome (Android/PC), Edge (PC) or Safari (iPhone).', true);
       return;
     }
@@ -1086,6 +1258,11 @@
     meetingId = last && last.mt && Date.now() - (last.ts || 0) < 30 * 60000 ? last.mt : Date.now();
     $('mic').textContent = '■ Stop'; $('mic').classList.add('on');
     keepAwake();
+    if (g) {
+      status('Listening with Groq Whisper (boost ' + cfg.gain + '×) · ' + (tf() ? 'transcribing, then translating each paragraph with ' : 'translating with ') + translatorName() + '…');
+      startGroq();
+      return;
+    }
     try { startRec(); } catch (e) { status('Could not start: ' + e.message, true); stop(); return; }
     startVoice();
   }
@@ -1093,7 +1270,7 @@
     running = false;
     $('mic').textContent = '▶ Start'; $('mic').classList.remove('on');
     try { rec && rec.stop(); } catch {}
-    stopVoice();
+    stopVoice(); stopGroq();
     try { wakeLock && wakeLock.release(); } catch {}
     wakeLock = null;
     if (!$('status').classList.contains('err')) status('Stopped.');
@@ -1212,8 +1389,8 @@
   try { (JSON.parse(localStorage.getItem('lt_log') || '[]')).forEach(e => { entries.push(e); renderEntry(e); }); } catch {}
   turn = entries.length ? (entries[entries.length - 1].turn || 0) : 0;
   scrollDown(true);
-  if (iosNotSafari) status(IOS_MSG, true);
-  else if (!SR) status('Speech recognition not available in this browser. Use Chrome, Edge, or Safari.', true);
+  if (iosNotSafari && !useGroq()) status(IOS_MSG + ' Or choose the Groq listener in ⚙️, which works in any browser.', true);
+  else if (!SR && !useGroq()) status('Speech recognition not available in this browser. Use Chrome, Edge, or Safari.', true);
   else if (!window.isSecureContext) status('Mic needs HTTPS (or localhost). Open this page over https://', true);
 })();
 </script>
