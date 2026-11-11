@@ -165,6 +165,9 @@
     </div>
     <p style="font-size:12px;color:var(--muted);margin:8px 0 0">Records the room itself (with the boost above), sends short clips to Groq's Whisper to write down, then translates with the translator above. Text appears a few seconds after it is said. Groq's free plan is enough for about 2 hours of talk per hour.</p>
   </div>
+  <label for="terms">Key terms (optional): course topic, English terms, names</label>
+  <textarea id="terms" rows="2" style="width:100%;min-height:56px" placeholder="e.g. Biochemistry: ATP synthase, mitochondria, enzyme kinetics, Michaelis-Menten, 王教授"></textarea>
+  <p style="font-size:12px;color:var(--muted);margin:4px 0 0">Helps the listener write these words correctly (in English when the speaker says them in English) and helps the translator fix misheard terms. Change it for each class.</p>
   <label for="fs">Text size: <span id="fsVal"></span></label>
   <input type="range" id="fs" min="14" max="40" step="1">
   <label for="showZh">Show original Chinese</label>
@@ -250,6 +253,7 @@
     showZh: store.get('showZh', '1'), liveTr: store.get('liveTr', '1'), theme: store.get('theme', 'dark'),
     chunk: store.get('chunk', 'fast'), turns: store.get('turns', 'voice'), polish: store.get('polish', '1'),
     autoEn: store.get('autoEn', '1'), flow: store.get('flow', 'transcribe'),
+    terms: store.get('terms', ''),
     listener: store.get('listener', 'phone'), qkey: store.get('qkey', ''), gain: store.get('gain', '4'),
     engine: store.get('engine', 'google'), gkey: store.get('gkey', ''), gmodel: store.get('gmodel', ''),
     okey: store.get('okey', ''), omodel: store.get('omodel', ''), ckey: store.get('ckey', ''), cmodel: store.get('cmodel', ''),
@@ -263,6 +267,7 @@
     $('flow').value = cfg.flow;
     $('listener').value = cfg.listener; $('groqBox').style.display = cfg.listener === 'groq' ? '' : 'none';
     if (document.activeElement !== $('qkey')) $('qkey').value = cfg.qkey;
+    if (document.activeElement !== $('terms')) $('terms').value = cfg.terms;
     $('gain').value = cfg.gain; $('gainVal').textContent = cfg.gain + '×';
     if (gq.gainNode) gq.gainNode.gain.value = +cfg.gain;
     $('liveOnly').style.display = tf() ? 'none' : '';
@@ -304,6 +309,7 @@
   });
   bind('listener', 'listener', () => { if (running) { stop(); start(); } });
   bind('gain', 'gain');
+  $('terms').addEventListener('input', e => { cfg.terms = e.target.value; store.set('terms', cfg.terms); });
   const saveQ = e => { cfg.qkey = e.target.value.trim(); store.set('qkey', cfg.qkey); };
   $('qkey').addEventListener('input', saveQ); $('qkey').addEventListener('change', saveQ);
   bind('engine', 'engine');
@@ -556,7 +562,10 @@
       + ' phrasing; render Chinese set phrases and idioms by what they mean, not literally.\n'
       + '- Leave out spoken filler and false starts (那個, 就是, 然後, 對, 嗯, 啊, 這個, repeated words) unless they carry meaning.\n'
       + '- Make it follow on smoothly from the earlier lines, using pronouns and linking words where a natural speaker would.\n'
-      + '- Use the usual ' + tgt + ' term for technical, academic or business concepts.\n'
+      + '- Use the usual ' + tgt + ' term for technical, academic or business concepts. Speakers often say scientific'
+      + ' terms in English; speech recognition may have written those as Chinese characters that only sound alike'
+      + ' (e.g. 麥寇 for "micro") or misspelled them: restore the intended term.\n'
+      + (cfg.terms.trim() ? '- Topic and key terms of this session (spell them like this): ' + cfg.terms.trim().slice(0, 400) + '\n' : '')
       + '- Keep the speaker\'s meaning, tone and formality: conversational speech stays conversational. Do NOT add emotion,'
       + ' drama, emphasis, opinions or facts that were not said, and do not exaggerate or soften.\n'
       + '- If the piece is unfinished, translate what is there without completing the thought.\n'
@@ -1155,8 +1164,11 @@
     fd.append('response_format', 'verbose_json'); // per-part scores, to drop parts Whisper itself thinks are not speech
     // Fix the language: guessing it per clip turns noise into Japanese "subtitles". English words are still kept.
     fd.append('language', base(cfg.src) === 'en' ? 'en' : cfg.src.startsWith('yue') ? 'yue' : 'zh');
-    // A plain earlier sentence (not an instruction) nudges Whisper toward Traditional characters without being echoed.
-    fd.append('prompt', gq.tail || (base(cfg.src) === 'en' ? '' : '好，我們開始今天的內容。'));
+    // Whisper copies the style of this "earlier text": Traditional characters, with English terms written in English,
+    // plus the key terms so it spells them right. Plain sentences, not instructions, so it is not echoed.
+    const terms = cfg.terms.trim().replace(/\s+/g, ' ').slice(0, 150);
+    const lead = base(cfg.src) === 'en' ? '' : '好，我們今天繼續上次的 model，先看一下這個 data 的 distribution。';
+    fd.append('prompt', (lead + (terms ? terms + '。' : '') + (gq.tail ? gq.tail.slice(-50) : '')).slice(-200));
     const r = await fetch(GROQ_URL, { method: 'POST', headers: { Authorization: 'Bearer ' + cfg.qkey }, body: fd });
     const j = await r.json().catch(() => ({}));
     if (!r.ok) { const e = new Error((j.error && j.error.message) || ('HTTP ' + r.status)); e.status = r.status; throw e; }
