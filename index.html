@@ -1019,7 +1019,7 @@
       const bars = Math.max(0, Math.min(10, Math.round(gq.level * 50)));
       if (secs > 10 && !gq.sent) hint = 'No speech detected yet: raise the Microphone boost in ⚙️, or move the phone closer.';
       $('diag').textContent = 'Check: ' + ok(dg.audio) + ' mic  level ' + '▮'.repeat(bars) + '▯'.repeat(10 - bars)
-        + '  · clips sent ' + gq.sent + ', written ' + dg.results + (dg.err ? '  · last error: ' + dg.err : '') + (hint ? '\n⚠️ ' + hint : '');
+        + '  · clips sent ' + gq.sent + ', written ' + dg.results + (gq.dropped ? ', noise skipped ' + gq.dropped : '') + (dg.err ? '  · last error: ' + dg.err : '') + (hint ? '\n⚠️ ' + hint : '');
       $('diag').style.whiteSpace = 'pre-wrap';
       return;
     }
@@ -1116,7 +1116,7 @@
 
   // ---------- Groq Whisper listener: record the room ourselves (with a volume boost) and send short clips to be written down ----------
   const gq = { ctx: null, stream: null, gainNode: null, an: null, out: null, rec: null, timer: null, mime: '', clipStart: 0,
-    quietMs: 0, speechMs: 0, level: 0, noise: 0.01, chain: Promise.resolve(), sent: 0, tail: '', ticks: 0 };
+    quietMs: 0, speechMs: 0, level: 0, noise: 0.01, chain: Promise.resolve(), sent: 0, tail: '', ticks: 0, dropped: 0 };
   const GROQ_URL = 'https://api.groq.com/openai/v1/audio/transcriptions';
   const useGroq = () => cfg.listener === 'groq';
   function pickMime() {
@@ -1139,10 +1139,11 @@
     return { ctx, stream, gain, an, out: dest.stream };
   }
   // Whisper sometimes "hears" video-subtitle phrases in silence or noise: drop those.
-  const HALLU = /(字幕|訂閱|订阅|點贊|点赞|轉發|打賞|明鏡|謝謝觀看|谢谢观看|感謝觀看|感谢观看|Amara|請不吝|请不吝|優優|以下是台灣)/i;
+  const HALLU = /(字幕|訂閱|订阅|點贊|点赞|轉發|打賞|明鏡|謝謝觀看|谢谢观看|感謝觀看|感谢观看|Amara|請不吝|请不吝|優優|以下是台灣|影片|動画|视频|視頻|本節目|本节目|※)/i;
   function cleanWhisper(t) {
     t = (t || '').trim();
     if (!t || HALLU.test(t) || /^[\s\p{P}\p{S}]*$/u.test(t)) return '';
+    if (/[\p{Script=Hiragana}\p{Script=Katakana}]/u.test(t)) return ''; // Japanese in a Chinese/English class = noise
     return t;
   }
   async function groqTranscribe(blob) {
@@ -1151,13 +1152,20 @@
     fd.append('file', blob, 'clip.' + ext);
     fd.append('model', 'whisper-large-v3');
     fd.append('temperature', '0');
-    fd.append('response_format', 'json');
-    // Chinese sources: let Whisper detect the language per clip, so English said in a Mandarin class comes out as English.
-    if (base(cfg.src) === 'en') fd.append('language', 'en');
-    fd.append('prompt', (base(cfg.src) === 'en' ? '' : '以下是台灣的課堂或會議內容，使用繁體中文。') + gq.tail);
+    fd.append('response_format', 'verbose_json'); // per-part scores, to drop parts Whisper itself thinks are not speech
+    // Fix the language: guessing it per clip turns noise into Japanese "subtitles". English words are still kept.
+    fd.append('language', base(cfg.src) === 'en' ? 'en' : cfg.src.startsWith('yue') ? 'yue' : 'zh');
+    // A plain earlier sentence (not an instruction) nudges Whisper toward Traditional characters without being echoed.
+    fd.append('prompt', gq.tail || (base(cfg.src) === 'en' ? '' : '好，我們開始今天的內容。'));
     const r = await fetch(GROQ_URL, { method: 'POST', headers: { Authorization: 'Bearer ' + cfg.qkey }, body: fd });
     const j = await r.json().catch(() => ({}));
     if (!r.ok) { const e = new Error((j.error && j.error.message) || ('HTTP ' + r.status)); e.status = r.status; throw e; }
+    if (Array.isArray(j.segments)) {
+      // keep only parts that are clearly speech: Whisper invents text for silence and noise
+      const keep = j.segments.filter(s => (s.no_speech_prob ?? 0) < 0.5 && (s.avg_logprob ?? 0) > -1 && (s.compression_ratio ?? 1) < 2.4);
+      gq.dropped += j.segments.length - keep.length;
+      return keep.map(s => cleanWhisper(s.text)).filter(Boolean).join(base(cfg.src) === 'en' ? ' ' : '');
+    }
     return cleanWhisper(j.text);
   }
   // Split at sentence ends (。？！.?!); very short pieces stay with the sentence before them.
@@ -1192,7 +1200,7 @@
     });
   }
   function newClip() {
-    const old = gq.rec, hadSpeech = gq.speechMs >= 400;
+    const old = gq.rec, hadSpeech = gq.speechMs >= 300; // Whisper's own speech check (above) removes noise-only clips
     gq.speechMs = 0; gq.quietMs = 0; gq.clipStart = Date.now();
     gq.rec = null;
     if (running && gq.out) {
@@ -1205,7 +1213,7 @@
     if (old && old.state !== 'inactive') { old._send = hadSpeech; old.stop(); }
   }
   async function startGroq() {
-    Object.assign(gq, { sent: 0, tail: '', chain: Promise.resolve(), level: 0, noise: 0.01 });
+    Object.assign(gq, { sent: 0, tail: '', chain: Promise.resolve(), level: 0, avg: 0, dropped: 0 });
     if (!window.MediaRecorder) { status('This browser cannot record audio. Update the phone, or use Safari / Chrome.', true); stop(); return; }
     let m;
     try { m = await openBoostedMic(); }
@@ -1220,12 +1228,13 @@
       let s = 0; for (let i = 0; i < buf.length; i++) s += buf[i] * buf[i];
       const rms = Math.sqrt(s / buf.length);
       gq.level = gq.level * 0.6 + rms * 0.4;
-      gq.noise = rms < gq.noise * 2 ? gq.noise * 0.95 + rms * 0.05 : gq.noise * 0.998 + rms * 0.002;
-      if (rms > Math.max(0.008, gq.noise * 2.5)) { gq.speechMs += 50; gq.quietMs = 0; dg.speech = dg.speech || 1; }
-      else gq.quietMs += 50;
+      // A far voice is hard to tell from room noise, so don't try: Whisper decides what is speech. Here we only
+      // cut clips where the sound dips (the speaker's small pauses), 3-12 s long, and skip clips of true silence.
+      gq.avg = (gq.avg || rms) * 0.97 + rms * 0.03; // the last ~2 s
+      if (rms > 0.003) { gq.speechMs += 50; dg.speech = dg.speech || 1; }
+      if (rms < gq.avg * 0.6) gq.quietMs += 50; else gq.quietMs = 0;
       const dur = Date.now() - gq.clipStart;
-      // send a clip at the speaker's pause (once there is some speech), or every 15 s of non-stop talk
-      if ((gq.speechMs >= 1000 && gq.quietMs >= 600 && dur >= 2500) || dur >= 15000) newClip();
+      if ((dur >= 3000 && gq.quietMs >= 350) || dur >= 12000) newClip();
       if (++gq.ticks % 5 === 0) showDiag();
     }, 50);
   }
